@@ -6,6 +6,9 @@ _configuration.mk
 
 bin/
 
+
+build/
+
 **/*.o
 **/*.d
 
