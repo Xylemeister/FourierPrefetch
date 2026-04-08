@@ -113,6 +113,38 @@ namespace Transform {
 
     };
 
+
+    class FourierPrefetchV1 {
+
+        // for a start with start with this stupid idea of using the behaviour instead of IP
+        // for initiating prefetch, my hypothesis is that different IPs might be using the same
+        // data structure with the same pattern thus we can use information learned in other IPs
+        // hypothesis is that the pattern/frequency behaviour is unique for different behaviours
+        // for now we just use the strongest one, it can be a hash type of thing in the future
+        struct tracker_entry {
+            uint64_t stronges_bin = 0; // frequency with the strongest power as identifier
+            uint64_t last_cl_addr = 0;
+            uint64_t last_stride = 0;
+        };
+
+    };
+
+    class FourierPrefetchV2 {
+       // this is the second class of fourier prefetch
+       // in here, we derive the PF deltas directly from the result of our fourier transform
+       // such taht if we have a good strong period then we can prefetch the last "PERIOD" deltas
+       // im not sure how this is going to work as the concept of fourier transform doesnt understand time
+       // or where we are currently in the wave, we might be able to find some ways to circumvent that with a
+       // DIscrete wavelet transform which I still need to understand
+       // basically a DWT, instead of using infinite-horizon cosine to sample or find similarity in the wave it uses
+       // a finite time one
+    };
+
+
+    class FourierPrefetchV3{
+      // this is another approach where we use the fourier series as an idea to make filtering decisions in our pipeline
+    };
+
 } // Transform
 
 
