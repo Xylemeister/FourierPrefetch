@@ -12,6 +12,7 @@
 #include <memory>
 #include <cmath>
 #include <iostream>
+#include "msl/lru_table.h"
 
 
 
@@ -23,20 +24,21 @@ namespace Transform {
         public:
 
         using WaveType = std::array<std::array<double, SIZE>, SIZE>;
-        static const int EFFECTIVE_SIZE = SIZE/2 + 1;
+        static constexpr std::size_t EFFECTIVE_SIZE = SIZE/2 + 1;
+        static constexpr double PI = 3.14159265358979323846;
 
         // this should set all the entries to zeroes
         // when we started sampling we fill out the windows with zeroes for the fourier
         // maybe it is better to just do the FT on valid values? but
         // to my knowledge this is how it's usually done
         TransformBuf(){
-            for (int i = 0; i < SIZE; i++){
+            for (std::size_t i = 0; i < SIZE; i++){
                 buf_[i] = 0;
             }
         }
 
         // this push will push to the buffer if buffer is full the oldest gets thrown
-        void Insert(uint64_t elem){
+        void Insert(int64_t elem){
             buf_[head] = elem;
             head = (head + 1) % SIZE;
         }
@@ -44,10 +46,10 @@ namespace Transform {
         void Transform(){
             // we are using effective size by exploiting the mirror behaviour of dft with real values
             // need to test this
-            for (int i = 0; i < EFFECTIVE_SIZE; i++){
+            for (std::size_t i = 0; i < EFFECTIVE_SIZE; i++){
                 double re = 0.0, im = 0.0;
-                for (int j =0; j < SIZE; j++){
-                    int offset = (head + j) % SIZE;
+                for (std::size_t j = 0; j < SIZE; j++){
+                    std::size_t offset = (head + j) % SIZE;
                     re += buf_[offset] * CosTable_[i][j];
                     im -= buf_[offset] * SineTable_[i][j];
                 }
@@ -62,40 +64,24 @@ namespace Transform {
         }
 
 
-        const uint64_t* viewBuf(){
+        const int64_t* viewBuf(){
             return buf_;
         }
 
-        const double* viewBin(){
+        const auto viewBin(){
             return bin_;
         }
 
 
-        // i dont think this is even conexpritable buit it is what it is
-        constexpr static WaveType ComputeSine(){
-            WaveType sin;
-            for (int i = 0; i < SIZE; i++){
-                for (int j = 0; j < SIZE; j++){
-                    double arg = (double(i) * double(j)  * M_PI * 2.0) / SIZE;
-                    sin[i][j] = std::sin(arg);
-
+        static WaveType ComputeTable(double(*fn)(double)){
+            WaveType result;
+            for (std::size_t i = 0; i < SIZE; i++){
+                for (std::size_t j = 0; j < SIZE; j++){
+                    double arg = (double(i) * double(j) * PI * 2.0) / SIZE;
+                    result[i][j] = fn(arg);
                 }
             }
-
-            return sin;
-        }
-
-        constexpr static WaveType ComputeCos(){
-            WaveType cos;
-            for (int i = 0; i < SIZE; i++){
-                for (int j = 0; j < SIZE; j++){
-                    double arg = (double(i) * double(j)  * M_PI * 2.0) / SIZE;
-                    cos[i][j] = std::cos(arg);
-
-                }
-            }
-
-            return cos;
+            return result;
         }
 
         private:
@@ -106,11 +92,11 @@ namespace Transform {
          *  I envision the transform to be something like for loop from head to Size, taking care
          *  of the circular behaviour of this buffer
          */
-        uint64_t buf_[SIZE];
+        int64_t buf_[SIZE];
 
         std::array<double, EFFECTIVE_SIZE> bin_;
-        constexpr static WaveType SineTable_ = ComputeSine();
-        constexpr static WaveType CosTable_ = ComputeCos();
+        static inline const WaveType SineTable_ = ComputeTable(std::sin);
+        static inline const WaveType CosTable_ = ComputeTable(std::cos);
     };
 
 
@@ -128,11 +114,11 @@ namespace Transform {
             uint64_t last_cl_addr = 0; // the last cl addr accessed for calculating deltas
             TransformBuf<WINDOW_SIZE> buf{}; // history of the last 16 deltas, this engine gives us the transform
 
-            auto index(){
+            auto index() const {
                 return ip;
             }
 
-            auto tag(){
+            auto tag() const {
                 return ip;
             }
         };
@@ -147,7 +133,7 @@ namespace Transform {
         // constexpr static int PREFETCH_DEGREE = 3;
 
         champsim::msl::lru_table<tracker_entry> table{TRACKER_SETS, TRACKER_WAYS};
-
+        public:
         void debug_lookup(uint64_t cl_addr, uint64_t ip){
             TransformBuf<WINDOW_SIZE> buf;
             auto found= table.check_hit({ip, cl_addr, buf});
@@ -155,14 +141,16 @@ namespace Transform {
 
             if (found.has_value()){
                 auto delta = static_cast<int64_t>(cl_addr) - static_cast<int64_t>(found->last_cl_addr);
-                if (delta < 0) return;
+                found->last_cl_addr = cl_addr;
+                table.fill(*found);
 
                 found->buf.Insert(delta);
-                found->buf.Transfrom();
+                found->buf.Transform();
+                table.fill(*found);
 
                 auto view = found->buf.viewBin();
 
-                for (int i = 0; i < found->EFFECTIVE_SIZE; i++){
+                for (std::size_t i = 0; i < TransformBuf<WINDOW_SIZE>::EFFECTIVE_SIZE; i++){
                     std::cout << " " << view[i] << "";
                 }
                 std::cout << std::endl;
