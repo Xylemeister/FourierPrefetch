@@ -3,37 +3,37 @@
 
 /*
  * Berti: an Accurate Local-Delta Data Prefetcher
- *  
+ *
  * 55th ACM/IEEE International Conference on Microarchitecture (MICRO 2022),
  * October 1-5, 2022, Chicago, Illinois, USA.
- * 
- * @Authors: Agustín Navarro-Torres, Biswabandan Panda, J. Alastruey-Benedé, 
+ *
+ * @Authors: Agustín Navarro-Torres, Biswabandan Panda, J. Alastruey-Benedé,
  *           Pablo Ibáñez, Víctor Viñals-Yúfera, and Alberto Ros
  * @Manteiners: Agustín Navarro -Torres
  * @Email: agusnt@unizar.es
  * @Date: 22/11/2022
- * 
+ *
  * This code is an update from the original code to work with the new version
  * of ChampSim: https://github.com/agusnt/Berti-Artifact
- * 
+ *
  * Maybe fine-tuning is required to get the optimal performance/accuracy.
- * 
- * Please note that this version of ChampSim has noticeable differences with 
+ *
+ * Please note that this version of ChampSim has noticeable differences with
  * the used for the paper, so results can varies.
- * 
+ *
  * Cite this:
- * 
- * A. Navarro-Torres, B. Panda, J. Alastruey-Benedé, P. Ibáñez, 
- * V. Viñals-Yúfera and A. Ros, 
- * "Berti: an Accurate Local-Delta Data Prefetcher," 
- * 2022 55th IEEE/ACM International Symposium on Microarchitecture (MICRO), 
+ *
+ * A. Navarro-Torres, B. Panda, J. Alastruey-Benedé, P. Ibáñez,
+ * V. Viñals-Yúfera and A. Ros,
+ * "Berti: an Accurate Local-Delta Data Prefetcher,"
+ * 2022 55th IEEE/ACM International Symposium on Microarchitecture (MICRO),
  * 2022, pp. 975-991, doi: 10.1109/MICRO56248.2022.00072.
- * 
- * @INPROCEEDINGS{9923806,  author={Navarro-Torres, Agustín and Panda, 
+ *
+ * @INPROCEEDINGS{9923806,  author={Navarro-Torres, Agustín and Panda,
  * Biswabandan and Alastruey-Benedé, Jesús and Ibáñez, Pablo and Viñals-Yúfera,
- * Víctor and Ros, Alberto},  booktitle={2022 55th IEEE/ACM International 
- * Symposium on Microarchitecture (MICRO)},   title={Berti: an Accurate 
- * Local-Delta Data Prefetcher},   year={2022},  volume={},  number={},  
+ * Víctor and Ros, Alberto},  booktitle={2022 55th IEEE/ACM International
+ * Symposium on Microarchitecture (MICRO)},   title={Berti: an Accurate
+ * Local-Delta Data Prefetcher},   year={2022},  volume={},  number={},
  * pages={975-991},  doi={10.1109/MICRO56248.2022.00072}}
  */
 
@@ -54,7 +54,7 @@ uint8_t LatencyTable::add(uint64_t addr, uint64_t tag, bool pf, uint64_t cycle)
    * Return: pf
    */
 
-  if constexpr (champsim::debug_print) 
+  if constexpr (champsim::debug_print)
   {
     std::cout << "[BERTI_LATENCY_TABLE] " << __func__;
     std::cout << " addr: " << std::hex << addr << " tag: " << tag;
@@ -70,7 +70,7 @@ uint8_t LatencyTable::add(uint64_t addr, uint64_t tag, bool pf, uint64_t cycle)
     // to do nothing more
     if (latencyt[i].addr == addr)
     {
-      if constexpr (champsim::debug_print) 
+      if constexpr (champsim::debug_print)
       {
         std::cout << " line already found; find_tag: " << latencyt[i].tag;
         std::cout << " find_pf: " << +latencyt[i].pf << std::endl;
@@ -108,7 +108,7 @@ uint64_t LatencyTable::del(uint64_t addr)
    *  Return: the latency of the address
    */
 
-  if constexpr (champsim::debug_print) 
+  if constexpr (champsim::debug_print)
   {
     std::cout << "[BERTI_LATENCY_TABLE] " << __func__;
     std::cout << " addr: " << std::hex << addr;
@@ -189,7 +189,7 @@ uint64_t LatencyTable::get_tag(uint64_t addr)
    * Return: ip-tag if the line is in the latency table, otherwise 0
    */
 
-  if constexpr (champsim::debug_print) 
+  if constexpr (champsim::debug_print)
   {
     std::cout << "[BERTI_LATENCY_TABLE] " << __func__;
     std::cout << " addr: " << std::hex << addr;
@@ -199,7 +199,7 @@ uint64_t LatencyTable::get_tag(uint64_t addr)
   {
     if (latencyt[i].addr == addr && latencyt[i].tag) // This is the address
     {
-      if constexpr (champsim::debug_print) 
+      if constexpr (champsim::debug_print)
       {
         std::cout << " tag: " << latencyt[i].tag << std::endl;
       }
@@ -261,7 +261,7 @@ bool ShadowCache::get(uint64_t addr)
   {
     for (int ii = 0; ii < ways; ii++)
     {
-      if (scache[i][ii].addr == addr) 
+      if (scache[i][ii].addr == addr)
       {
         if constexpr (champsim::debug_print)
         {
@@ -281,7 +281,7 @@ void ShadowCache::set_pf(uint64_t addr, bool pf)
    * Parameters:
    *      - addr: cache block v_addr
    *
-   * Return: change value of pf field 
+   * Return: change value of pf field
    */
   if constexpr (champsim::debug_print)
   {
@@ -293,7 +293,7 @@ void ShadowCache::set_pf(uint64_t addr, bool pf)
   {
     for (int ii = 0; ii < ways; ii++)
     {
-      if (scache[i][ii].addr == addr) 
+      if (scache[i][ii].addr == addr)
       {
         if constexpr (champsim::debug_print)
         {
@@ -367,7 +367,7 @@ uint64_t ShadowCache::get_latency(uint64_t addr)
   {
     for (int ii = 0; ii < ways; ii++)
     {
-      if (scache[i][ii].addr == addr) 
+      if (scache[i][ii].addr == addr)
       {
         if constexpr (champsim::debug_print)
         {
@@ -421,8 +421,8 @@ void HistoryTable::add(uint64_t tag, uint64_t addr, uint64_t cycle)
   } else history_pointers[set]++; // Pointer to the next (oldest) entry
 }
 
-uint16_t HistoryTable::get_aux(uint32_t latency, 
-    uint64_t tag, uint64_t act_addr, uint64_t *tags, uint64_t *addr, 
+uint16_t HistoryTable::get_aux(uint32_t latency,
+    uint64_t tag, uint64_t act_addr, uint64_t *tags, uint64_t *addr,
     uint64_t cycle)
 {
   /*
@@ -448,7 +448,7 @@ uint16_t HistoryTable::get_aux(uint32_t latency,
   if (cycle < latency) return num_on_time;
 
   // The IPs that is launch in this cycle will be able to launch this prefetch
-  cycle -= latency; 
+  cycle -= latency;
 
   // Pointer to guide
   history_table *pointer = history_pointers[set];
@@ -517,7 +517,7 @@ void Berti::increase_conf_tag(uint64_t tag)
   if (bertit.find(tag) == bertit.end())
   {
     // Tag not found
-    if constexpr (champsim::debug_print) 
+    if constexpr (champsim::debug_print)
       std::cout << " TAG NOT FOUND" << std::endl;
 
     return;
@@ -527,11 +527,11 @@ void Berti::increase_conf_tag(uint64_t tag)
 
   bertit[tag]->conf += CONFIDENCE_INC;
 
-  if constexpr (champsim::debug_print) 
+  if constexpr (champsim::debug_print)
     std::cout << " global_conf: " << bertit[tag]->conf;
 
 
-  if (bertit[tag]->conf == CONFIDENCE_MAX) 
+  if (bertit[tag]->conf == CONFIDENCE_MAX)
   {
 
     // Max confidence achieve
@@ -543,7 +543,7 @@ void Berti::increase_conf_tag(uint64_t tag)
       else if (i.conf > CONFIDENCE_L2R) i.rpl = BERTI_L2R;
       else i.rpl = BERTI_R;
 
-      if constexpr (champsim::debug_print) 
+      if constexpr (champsim::debug_print)
       {
         std::cout << "Delta: " << i.delta;
         std::cout << " Conf: "  << i.conf << " Level: " << +i.rpl;
@@ -662,7 +662,7 @@ void Berti::add(uint64_t tag, int64_t delta)
 
   // We find the delta with less confidence
   std::sort(std::begin(entry->deltas), std::end(entry->deltas), compare_rpl);
-  if (entry->deltas.front().rpl == BERTI_R || entry->deltas.front().rpl == BERTI_L2R) 
+  if (entry->deltas.front().rpl == BERTI_R || entry->deltas.front().rpl == BERTI_L2R)
   {
     if constexpr (champsim::debug_print)
       std::cout << " replaced_delta: " << entry->deltas.front().delta << std::endl;
@@ -726,9 +726,9 @@ uint8_t Berti::get(uint64_t tag, std::vector<delta_t> &res)
   return 1;
 }
 
-void Berti::find_and_update(uint64_t latency, uint64_t tag, uint64_t cycle, 
+void Berti::find_and_update(uint64_t latency, uint64_t tag, uint64_t cycle,
     uint64_t line_addr)
-{ 
+{
   // We were tracking this miss
   uint64_t tags[HISTORY_TABLE_WAYS];
   uint64_t addr[HISTORY_TABLE_WAYS];
@@ -751,7 +751,7 @@ void Berti::find_and_update(uint64_t latency, uint64_t tag, uint64_t cycle,
     // negative strides)
     stride = (int64_t) (line_addr - addr[i]);
 
-    if ((std::abs(stride) < (1 << DELTA_MASK))) add(tags[i], stride); 
+    if ((std::abs(stride) < (1 << DELTA_MASK))) add(tags[i], stride);
   }
 }
 
@@ -899,7 +899,7 @@ uint64_t Berti::ip_hash(uint64_t ip)
 /******************************************************************************/
 /*                        Cache Functions                                     */
 /******************************************************************************/
-void CACHE::prefetcher_initialize() 
+void CACHE::prefetcher_initialize()
 {
   // Calculate latency table size
   uint64_t latency_table_size = get_mshr_size();
@@ -966,14 +966,14 @@ void CACHE::prefetcher_initialize()
   std::cout << "BERTI HASH FOLD" << std::endl;
 #endif
   std::cout << "BERTI IP MASK " << std::hex << IP_MASK << std::dec << std::endl;
- 
+
 }
 
 void CACHE::prefetcher_cycle_operate()
 {}
 
-uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip, 
-                                         uint8_t cache_hit, bool useful_prefetch, 
+uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
+                                         uint8_t cache_hit, bool useful_prefetch,
                                          uint8_t type, uint32_t metadata_in)
 {
   // We select the structures for every cpu
@@ -983,10 +983,10 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
   berti = bigPicture[cpu].berti;
 
   uint64_t line_addr = (addr >> LOG2_BLOCK_SIZE); // Line addr
-   
+
   if (line_addr == 0) return metadata_in;
-  
-  if constexpr (champsim::debug_print) 
+
+  if constexpr (champsim::debug_print)
   {
     std::cout << "[BERTI] operate";
     std::cout << " ip: " << std::hex << ip;
@@ -998,7 +998,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
 
   if (!cache_hit) // This is a miss
   {
-    if constexpr (champsim::debug_print) 
+    if constexpr (champsim::debug_print)
       std::cout << "[BERTI] operate cache miss" << std::endl;
 
     latencyt->add(line_addr, ip_hash, false, current_cycle); // Add @ to latency
@@ -1018,7 +1018,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
     historyt->add(ip_hash, line_addr, current_cycle & TIME_MASK);
   } else
   {
-    if constexpr (champsim::debug_print) 
+    if constexpr (champsim::debug_print)
       std::cout << "[BERTI] operate cache hit" << std::endl;
   }
 
@@ -1048,7 +1048,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
 
     bool fill_this_level = (i.rpl == BERTI_L1) && (mshr_load < MSHR_LIMIT);
 
-    if (i.rpl == BERTI_L1 && mshr_load >= MSHR_LIMIT) pf_to_l2_bc_mshr++; 
+    if (i.rpl == BERTI_L1 && mshr_load >= MSHR_LIMIT) pf_to_l2_bc_mshr++;
     if (fill_this_level) pf_to_l1++;
     else pf_to_l2++;
 
@@ -1081,7 +1081,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
   return metadata_in;
 }
 
-uint32_t CACHE::prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, 
+uint32_t CACHE::prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
                                       uint8_t prefetch, uint64_t evicted_addr,
                                       uint32_t metadata_in)
 {
@@ -1119,7 +1119,7 @@ uint32_t CACHE::prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
       if (average_latency.num == 0) average_latency.average = (float) latency;
       else
       {
-        average_latency.average = average_latency.average + 
+        average_latency.average = average_latency.average +
           ((((float) latency) - average_latency.average) / average_latency.num);
       }
       average_latency.num++;

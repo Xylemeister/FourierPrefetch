@@ -8,8 +8,10 @@
 #include <cstdint>
 #include <array>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <cmath>
+#include <iostream>
 
 
 
@@ -109,8 +111,6 @@ namespace Transform {
         std::array<double, EFFECTIVE_SIZE> bin_;
         constexpr static WaveType SineTable_ = ComputeSine();
         constexpr static WaveType CosTable_ = ComputeCos();
-
-
     };
 
 
@@ -121,11 +121,59 @@ namespace Transform {
         // data structure with the same pattern thus we can use information learned in other IPs
         // hypothesis is that the pattern/frequency behaviour is unique for different behaviours
         // for now we just use the strongest one, it can be a hash type of thing in the future
+        constexpr static size_t WINDOW_SIZE = 16;
+
         struct tracker_entry {
-            uint64_t stronges_bin = 0; // frequency with the strongest power as identifier
-            uint64_t last_cl_addr = 0;
-            uint64_t last_stride = 0;
+            uint64_t ip = 0; // the ip tag, to differentiate regions
+            uint64_t last_cl_addr = 0; // the last cl addr accessed for calculating deltas
+            TransformBuf<WINDOW_SIZE> buf{}; // history of the last 16 deltas, this engine gives us the transform
+
+            auto index(){
+                return ip;
+            }
+
+            auto tag(){
+                return ip;
+            }
         };
+
+
+        // struct lookahead_entry {
+        //     uint64_t stride;
+        // }
+
+        constexpr static std::size_t TRACKER_SETS = 256;
+        constexpr static std::size_t TRACKER_WAYS = 4;
+        // constexpr static int PREFETCH_DEGREE = 3;
+
+        champsim::msl::lru_table<tracker_entry> table{TRACKER_SETS, TRACKER_WAYS};
+
+        void debug_lookup(uint64_t cl_addr, uint64_t ip){
+            TransformBuf<WINDOW_SIZE> buf;
+            auto found= table.check_hit({ip, cl_addr, buf});
+
+
+            if (found.has_value()){
+                auto delta = static_cast<int64_t>(cl_addr) - static_cast<int64_t>(found->last_cl_addr);
+                if (delta < 0) return;
+
+                found->buf.Insert(delta);
+                found->buf.Transfrom();
+
+                auto view = found->buf.viewBin();
+
+                for (int i = 0; i < found->EFFECTIVE_SIZE; i++){
+                    std::cout << " " << view[i] << "";
+                }
+                std::cout << std::endl;
+
+            }
+            else{
+                table.fill({ip, cl_addr, buf});
+            }
+
+        }
+
 
     };
 
@@ -138,6 +186,7 @@ namespace Transform {
        // DIscrete wavelet transform which I still need to understand
        // basically a DWT, instead of using infinite-horizon cosine to sample or find similarity in the wave it uses
        // a finite time one
+       // the problem with using the raw  fourier series is that we have infinite time cosine in such a case
     };
 
 
