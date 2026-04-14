@@ -20,11 +20,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip, uint8_t cac
     uint64_t walk_cl = cl_addr;
     for (auto& c : candidates) {
         walk_cl += static_cast<uint64_t>(c.delta);
-
         uint64_t pf_addr = walk_cl << LOG2_BLOCK_SIZE;
-
-        // Do not cross virtual page boundaries
-        if ((pf_addr >> LOG2_PAGE_SIZE) != (addr >> LOG2_PAGE_SIZE)) continue;
 
         prefetch_line(pf_addr, c.fill_l1, metadata_in);
     }

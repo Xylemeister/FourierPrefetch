@@ -99,6 +99,8 @@ public:
 
     // Fraction of total AC power held by the dominant bin.
     // Range [0, 1]: 1.0 = perfectly periodic, 0.0 = no signal.
+    // to check if its just by chance, or there is a strong correlation
+    // I guess we are skipping the DC component here
     double SpectralPurity() const
     {
         double total = 0.0;
@@ -111,8 +113,6 @@ public:
     {
         std::size_t n = std::min(period, count_);
         std::vector<int64_t> out(n);
-        // The slot just before head_ is the most-recently written entry.
-        // Walk back `n` steps from there to get the oldest in the window.
         for (std::size_t i = 0; i < n; ++i) {
             std::size_t pos = (head_ + SIZE - n + i) % SIZE;
             out[i] = buf_[pos];
@@ -146,18 +146,10 @@ private:
     static inline const TrigTable CosTable_  = ComputeTable(std::cos);
 };
 
-/*****************************************************************************
- *                          PrefetchCandidate                                *
- *****************************************************************************/
-
 struct PrefetchCandidate {
     int64_t delta;    // cache-line delta from the current address
     bool    fill_l1;  // true → fill to L1, false → fill to L2
 };
-
-/*****************************************************************************
- *                          FourierPrefetchV1                                *
- *****************************************************************************/
 
 /*
  * Per-IP tracker table.  On each access:
