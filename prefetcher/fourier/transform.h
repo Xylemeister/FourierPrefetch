@@ -30,11 +30,11 @@ namespace Transform {
  *                          Parameters                                       *
  *****************************************************************************/
 
-constexpr std::size_t WINDOW_SIZE        = 16;   // delta history depth / DFT length
+constexpr std::size_t WINDOW_SIZE        = 64;   // delta history depth / DFT length
 constexpr std::size_t TRACKER_SETS       = 256;
 constexpr std::size_t TRACKER_WAYS       = 4;
-constexpr std::size_t PREFETCH_DEGREE    = 4;    // max candidates emitted per access
-constexpr double      SPECTRAL_THRESHOLD = 0.50; // dominant bin must hold ≥50% of AC power
+// constexpr std::size_t PREFETCH_DEGREE    = 4;  // replaced by full period — MSHR break acts as natural limiter
+constexpr double      SPECTRAL_THRESHOLD = 0.40; // dominant bin must hold ≥50% of AC power
 
 /*****************************************************************************
  *                          TransformBuf                                     *
@@ -81,7 +81,6 @@ public:
         }
     }
 
-    // to check if there is zero padding in the buffer or calc
     bool IsMature() const { return count_ >= SIZE; }
 
     std::size_t DominantBin() const
@@ -111,7 +110,8 @@ public:
 
     std::vector<int64_t> GetCyclicDeltas(std::size_t period) const
     {
-        std::size_t n = std::min(period, count_);
+        // std::size_t n = std::min(period, count_);
+        std::size_t n = period;
         std::vector<int64_t> out(n);
         for (std::size_t i = 0; i < n; ++i) {
             std::size_t pos = (head_ + SIZE - n + i) % SIZE;
@@ -157,7 +157,7 @@ struct PrefetchCandidate {
  *   2. Insert the delta and recompute the spectrum.
  *   3. If the buffer is mature and SpectralPurity ≥ SPECTRAL_THRESHOLD,
  *      derive the dominant period P and return the last P deltas as
- *      prefetch candidates (capped at PREFETCH_DEGREE).
+ *      prefetch candidates (up to the full detected period).
  */
 class FourierPrefetchV1
 {
@@ -174,26 +174,14 @@ class FourierPrefetchV1
     champsim::msl::lru_table<tracker_entry> table_{TRACKER_SETS, TRACKER_WAYS};
 
 public:
-    /*
-     * Main entry point — call once per demand access.
-     *
-     * Parameters:
-     *   cl_addr : cache-line address (byte address >> LOG2_BLOCK_SIZE)
-     *   ip      : instruction pointer of the load/store
-     *
-     * Returns a (possibly empty) list of PrefetchCandidates.
-     * The caller should walk them, compute the prefetch address as
-     *   pf_cl += candidate.delta
-     * and call prefetch_line(pf_cl << LOG2_BLOCK_SIZE, candidate.fill_l1, …).
-     */
-    std::vector<PrefetchCandidate> Operate(uint64_t cl_addr, uint64_t ip)
+    std::vector<PrefetchCandidate> Operate(uint64_t cl_addr, uint64_t page, bool fill_l1)
     {
         TransformBuf<WINDOW_SIZE> tmp{};
-        auto found = table_.check_hit({ip, cl_addr, tmp});
+        auto found = table_.check_hit({page, cl_addr, tmp});
 
         if (!found.has_value()) {
             // First time we see this IP — allocate an entry, no prefetch yet.
-            table_.fill({ip, cl_addr, tmp});
+            table_.fill({page, cl_addr, tmp});
             return {};
         }
 
@@ -205,21 +193,22 @@ public:
         table_.fill(*found);
 
         // Guard: wait until the window is fully populated
+        // it is fine to ignore the first n accesses
         if (!found->buf.IsMature()) return {};
 
-        // Guard: require a clean dominant frequency
+        // Guard: require some dominant frequency
         if (found->buf.SpectralPurity() < SPECTRAL_THRESHOLD) return {};
 
         std::size_t k      = found->buf.DominantBin();
         std::size_t period = TransformBuf<WINDOW_SIZE>::PeriodOfBin(k);
-        std::size_t degree = std::min(period, PREFETCH_DEGREE);
+        // std::size_t degree = std::min(period, PREFETCH_DEGREE);
 
         auto cyclic = found->buf.GetCyclicDeltas(period);
 
         std::vector<PrefetchCandidate> candidates;
-        candidates.reserve(degree);
-        for (std::size_t i = 0; i < degree && i < cyclic.size(); ++i)
-            candidates.push_back({cyclic[i], /*fill_l1=*/true});
+        candidates.reserve(period);
+        for (std::size_t i = 0; i < period && i < cyclic.size(); ++i)
+            candidates.push_back({cyclic[i], fill_l1});
 
         return candidates;
     }
@@ -230,9 +219,8 @@ public:
      */
     void DebugOperate(uint64_t cl_addr, uint64_t ip)
     {
-        auto candidates = Operate(cl_addr, ip);
+        auto candidates = Operate(cl_addr, ip, /*fill_l1=*/true);
 
-        // Re-read the (now-updated) entry to print spectrum state
         TransformBuf<WINDOW_SIZE> tmp{};
         auto found = table_.check_hit({ip, cl_addr, tmp});
         if (!found.has_value()) return;
