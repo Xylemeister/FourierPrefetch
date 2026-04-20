@@ -30,11 +30,11 @@ namespace Transform {
  *                          Parameters                                       *
  *****************************************************************************/
 
-constexpr std::size_t WINDOW_SIZE        = 64;   // delta history depth / DFT length
+constexpr std::size_t WINDOW_SIZE        = 32;   // delta history depth / DFT length
 constexpr std::size_t TRACKER_SETS       = 256;
 constexpr std::size_t TRACKER_WAYS       = 4;
 // constexpr std::size_t PREFETCH_DEGREE    = 4;  // replaced by full period — MSHR break acts as natural limiter
-constexpr double      SPECTRAL_THRESHOLD = 0.40; // dominant bin must hold ≥50% of AC power
+constexpr double      SPECTRAL_THRESHOLD = 0.50; // dominant bin must hold ≥50% of AC power
 
 /*****************************************************************************
  *                          TransformBuf                                     *
@@ -174,14 +174,14 @@ class FourierPrefetchV1
     champsim::msl::lru_table<tracker_entry> table_{TRACKER_SETS, TRACKER_WAYS};
 
 public:
-    std::vector<PrefetchCandidate> Operate(uint64_t cl_addr, uint64_t page, bool fill_l1)
+    std::vector<PrefetchCandidate> Operate(uint64_t cl_addr, uint64_t ip, bool fill_l1)
     {
         TransformBuf<WINDOW_SIZE> tmp{};
-        auto found = table_.check_hit({page, cl_addr, tmp});
+        auto found = table_.check_hit({ip, cl_addr, tmp});
 
         if (!found.has_value()) {
             // First time we see this IP — allocate an entry, no prefetch yet.
-            table_.fill({page, cl_addr, tmp});
+            table_.fill({ip, cl_addr, tmp});
             return {};
         }
 
@@ -194,7 +194,7 @@ public:
 
         // Guard: wait until the window is fully populated
         // it is fine to ignore the first n accesses
-        if (!found->buf.IsMature()) return {};
+        // if (!found->buf.IsMature()) return {};
 
         // Guard: require some dominant frequency
         if (found->buf.SpectralPurity() < SPECTRAL_THRESHOLD) return {};

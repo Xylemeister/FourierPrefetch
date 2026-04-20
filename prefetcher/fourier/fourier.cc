@@ -14,7 +14,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip, uint8_t cac
 {
     uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
     bool     fill_l1 = (get_mshr_occupancy_ratio() < 0.5f);
-    auto     candidates = tracker.Operate(cl_addr, addr >> LOG2_PAGE_SIZE, fill_l1);
+    auto     candidates = tracker.Operate(cl_addr,ip, fill_l1);
 
     // Precompute all prefetch addresses (deltas are cumulative in the chain).
     uint64_t walk_cl = cl_addr;
