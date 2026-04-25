@@ -13,7 +13,7 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip, uint8_t cac
                                          uint32_t metadata_in)
 {
     auto cl_addr = addr >> LOG2_BLOCK_SIZE;
-    engine.update(cl_addr);
+    engine.update(cl_addr, ip);
 
     auto delta = engine.issue();
     if (delta.has_value() && delta.value() != 0) {

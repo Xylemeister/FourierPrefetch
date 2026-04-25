@@ -206,27 +206,16 @@ public:
     // TransformBuf<WINDOW_SIZE> globalTransformBuf;
     void update(uint64_t cl_addr, uint64_t ip){
         TransformBuf<WINDOW_SIZE> tmp;
-
         auto found = table_.check_hit(ip, cl_addr, tmp);
 
         if (found.has_value()){
             auto stride = static_cast<int64_t>(cl_addr) - static_cast<int64_t>(found->last_cl_addr);
         }
+
     }
 
     std::optional<int64_t> issue(){
-        if (!globalTransformBuf.IsMature()) return std::nullopt;
-        if (globalTransformBuf.SpectralPurity() < SPECTRAL_THRESHOLD){
-            int64_t offset = static_cast<int64_t>(std::round(globalTransformBuf.getMean()));
-            if (offset == 0) return std::nullopt;
-            return offset;
-        }
-
-        auto freq_id = globalTransformBuf.DominantBin();
-        auto period = globalTransformBuf.PeriodOfBin(freq_id);
-
-        return globalTransformBuf.getSingleDelta(period);
-
+        return std::nullopt;
     }
 
 
