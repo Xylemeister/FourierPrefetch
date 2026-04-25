@@ -206,7 +206,8 @@ public:
     // TransformBuf<WINDOW_SIZE> globalTransformBuf;
     void update(uint64_t cl_addr, uint64_t ip){
         TransformBuf<WINDOW_SIZE> tmp;
-        auto found = table_.check_hit(ip, cl_addr, tmp);
+        uint64_t confidence = 0;
+        auto found = table_.check_hit({ip, cl_addr, confidence, tmp});
 
         if (found.has_value()){
             auto stride = static_cast<int64_t>(cl_addr) - static_cast<int64_t>(found->last_cl_addr);
