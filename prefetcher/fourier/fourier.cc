@@ -4,7 +4,7 @@
 #include "cache.h"
 #include "transform.h"
 
-Transform::FourierPrefetchV1 tracker;
+Transform::FourierPrefetchV1 engine;
 
 void CACHE::prefetcher_initialize() {}
 
@@ -12,26 +12,15 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip, uint8_t cac
                                          bool useful_prefetch, uint8_t type,
                                          uint32_t metadata_in)
 {
-    uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
-    bool     fill_l1 = (get_mshr_occupancy_ratio() < 0.5f);
-    auto     candidates = tracker.Operate(cl_addr,ip, fill_l1);
+    auto cl_addr = addr >> LOG2_BLOCK_SIZE;
+    engine.update(cl_addr);
 
-    // Precompute all prefetch addresses (deltas are cumulative in the chain).
-    uint64_t walk_cl = cl_addr;
-    std::array<uint64_t, Transform::WINDOW_SIZE> pf_addrs{};
-    const std::size_t n = candidates.size();
-    for (std::size_t i = 0; i < n; ++i) {
-        walk_cl += static_cast<uint64_t>(candidates[i].delta);
-        pf_addrs[i] = walk_cl << LOG2_BLOCK_SIZE;
+    auto delta = engine.issue();
+    if (delta.has_value() && delta.value() != 0) {
+        uint64_t pf_cl   = static_cast<uint64_t>(static_cast<int64_t>(cl_addr) + delta.value());
+        uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
+        prefetch_line(pf_addr, (this->get_mshr_occupancy_ratio() < 0.5), metadata_in);
     }
-
-    // Issue furthest-first so the access needing the most lead time is
-    // queued first. Stop as soon as prefetch_line returns false — that
-    // signals the MSHR/prefetch queue is full, so further requests would
-    // be dropped anyway.
-    for (std::size_t i = n; i-- > 0;)
-        if (!prefetch_line(pf_addrs[i], candidates[i].fill_l1, metadata_in))
-            break;
 
     return metadata_in;
 }

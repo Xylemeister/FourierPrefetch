@@ -21,8 +21,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <vector>
 #include "msl/lru_table.h"
+#include <sys/types.h>
 
 namespace Transform {
 
@@ -30,7 +32,7 @@ namespace Transform {
  *                          Parameters                                       *
  *****************************************************************************/
 
-constexpr std::size_t WINDOW_SIZE        = 32;   // delta history depth / DFT length
+constexpr std::size_t WINDOW_SIZE        = 16;   // delta history depth / DFT length
 constexpr std::size_t TRACKER_SETS       = 256;
 constexpr std::size_t TRACKER_WAYS       = 4;
 // constexpr std::size_t PREFETCH_DEGREE    = 4;  // replaced by full period — MSHR break acts as natural limiter
@@ -120,6 +122,32 @@ public:
         return out;
     }
 
+    int64_t getSingleDelta(std::size_t period) const {
+        std::size_t pos = (head_ + SIZE - period) % SIZE;
+        int64_t prefetch_addr = 0;
+
+        // while (pos != head_){
+        //     prefetch_addr += buf_[pos];
+        //     pos = (pos + 1) % SIZE;
+        // }
+
+        for (size_t i = 0; i < period; i++){
+            prefetch_addr += buf_[(pos + i) % SIZE];
+        }
+
+        return prefetch_addr;
+    }
+
+    double getMean() const {
+        double res = 0;
+
+        for (auto& elem: buf_){
+            res += elem;
+        }
+
+        return res /SIZE;
+    }
+
     // Read-only views
     const std::array<double,  EFFECTIVE_SIZE>& viewBin() const { return bin_; }
     const std::array<int64_t, SIZE>&           viewBuf() const { return buf_; }
@@ -164,6 +192,7 @@ class FourierPrefetchV1
     struct tracker_entry {
         uint64_t ip           = 0;
         uint64_t last_cl_addr = 0;
+        uint64_t confidence = 0;
         TransformBuf<WINDOW_SIZE> buf{};
 
         // lru_table key interface
@@ -174,73 +203,33 @@ class FourierPrefetchV1
     champsim::msl::lru_table<tracker_entry> table_{TRACKER_SETS, TRACKER_WAYS};
 
 public:
-    std::vector<PrefetchCandidate> Operate(uint64_t cl_addr, uint64_t ip, bool fill_l1)
-    {
-        TransformBuf<WINDOW_SIZE> tmp{};
-        auto found = table_.check_hit({ip, cl_addr, tmp});
+    // TransformBuf<WINDOW_SIZE> globalTransformBuf;
+    void update(uint64_t cl_addr, uint64_t ip){
+        TransformBuf<WINDOW_SIZE> tmp;
 
-        if (!found.has_value()) {
-            // First time we see this IP — allocate an entry, no prefetch yet.
-            table_.fill({ip, cl_addr, tmp});
-            return {};
+        auto found = table_.check_hit(ip, cl_addr, tmp);
+
+        if (found.has_value()){
+            auto stride = static_cast<int64_t>(cl_addr) - static_cast<int64_t>(found->last_cl_addr);
+        }
+    }
+
+    std::optional<int64_t> issue(){
+        if (!globalTransformBuf.IsMature()) return std::nullopt;
+        if (globalTransformBuf.SpectralPurity() < SPECTRAL_THRESHOLD){
+            int64_t offset = static_cast<int64_t>(std::round(globalTransformBuf.getMean()));
+            if (offset == 0) return std::nullopt;
+            return offset;
         }
 
-        int64_t delta = static_cast<int64_t>(cl_addr)
-                      - static_cast<int64_t>(found->last_cl_addr);
-        found->last_cl_addr = cl_addr;
-        found->buf.Insert(delta);
-        found->buf.Transform();
-        table_.fill(*found);
+        auto freq_id = globalTransformBuf.DominantBin();
+        auto period = globalTransformBuf.PeriodOfBin(freq_id);
 
-        // Guard: wait until the window is fully populated
-        // it is fine to ignore the first n accesses
-        // if (!found->buf.IsMature()) return {};
+        return globalTransformBuf.getSingleDelta(period);
 
-        // Guard: require some dominant frequency
-        if (found->buf.SpectralPurity() < SPECTRAL_THRESHOLD) return {};
-
-        std::size_t k      = found->buf.DominantBin();
-        std::size_t period = TransformBuf<WINDOW_SIZE>::PeriodOfBin(k);
-        // std::size_t degree = std::min(period, PREFETCH_DEGREE);
-
-        auto cyclic = found->buf.GetCyclicDeltas(period);
-
-        std::vector<PrefetchCandidate> candidates;
-        candidates.reserve(period);
-        for (std::size_t i = 0; i < period && i < cyclic.size(); ++i)
-            candidates.push_back({cyclic[i], fill_l1});
-
-        return candidates;
     }
 
-    /*
-     * Debug helper — prints the power spectrum and derived candidates.
-     * Use in place of Operate when tracing; identical update semantics.
-     */
-    void DebugOperate(uint64_t cl_addr, uint64_t ip)
-    {
-        auto candidates = Operate(cl_addr, ip, /*fill_l1=*/true);
 
-        TransformBuf<WINDOW_SIZE> tmp{};
-        auto found = table_.check_hit({ip, cl_addr, tmp});
-        if (!found.has_value()) return;
-
-        std::size_t k      = found->buf.DominantBin();
-        std::size_t period = TransformBuf<WINDOW_SIZE>::PeriodOfBin(k);
-
-        std::cout << "[FOURIER]"
-                  << " ip="     << std::hex << ip
-                  << " cl="     << cl_addr  << std::dec
-                  << " mature=" << found->buf.IsMature()
-                  << " purity=" << found->buf.SpectralPurity()
-                  << " dom_bin=" << k
-                  << " period=" << period
-                  << " bins:";
-        for (auto v : found->buf.viewBin()) std::cout << ' ' << v;
-        std::cout << " | pf_deltas:";
-        for (auto& c : candidates) std::cout << ' ' << c.delta;
-        std::cout << '\n';
-    }
 };
 
 } // namespace Transform
