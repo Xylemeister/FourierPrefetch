@@ -32,10 +32,10 @@ namespace Transform {
  *                          Parameters                                       *
  *****************************************************************************/
 
-constexpr std::size_t WINDOW_SIZE        = 16;   // delta history depth / DFT length
+constexpr std::size_t WINDOW_SIZE        = 64;   // delta history depth / DFT length
 constexpr std::size_t TRACKER_SETS       = 256;
 constexpr std::size_t TRACKER_WAYS       = 4;
-// constexpr std::size_t PREFETCH_DEGREE    = 4;  // replaced by full period — MSHR break acts as natural limiter
+constexpr std::size_t PREFETCH_DEGREE    = 3;  // replaced by full period — MSHR break acts as natural limiter
 constexpr double      SPECTRAL_THRESHOLD = 0.50; // dominant bin must hold ≥50% of AC power
 
 /*****************************************************************************
@@ -83,12 +83,45 @@ public:
         }
     }
 
+
+    // Incremental O(K) sliding DFT — exact from the very first sample.
+    // buf_ is zero-initialised so outgoing is 0 until a slot is overwritten,
+    // equivalent to a zero-padded DFT of the samples seen so far.
+    //
+    // Recurrence per bin k:
+    //   X_k[n] = e^{j·2πk/N} · (X_k[n-1] + x_new − x_old)
+    void InsertTransform(int64_t value)
+    {
+        double outgoing = static_cast<double>(buf_[head_]);
+        Insert(value);
+
+        double d = static_cast<double>(value) - outgoing;
+        for (std::size_t k = 0; k < EFFECTIVE_SIZE; ++k) {
+            double r = re_[k] + d;
+            double i = im_[k];
+            double c = CosTable_[k][1];   // cos(2πk/N) — twiddle factor e^{j2πk/N}
+            double s = SineTable_[k][1];  // sin(2πk/N)
+            re_[k]  = r * c - i * s;
+            im_[k]  = r * s + i * c;
+            bin_[k] = re_[k] * re_[k] + im_[k] * im_[k];
+        }
+    }
+
     bool IsMature() const { return count_ >= SIZE; }
+
+    // Lowest bin whose period fits within the samples seen so far.
+    // Bins below this correspond to periods > count_, which are meaningless.
+    std::size_t MinBin() const
+    {
+        if (count_ == 0) return 1;
+        return std::max(std::size_t{1}, SIZE / count_);
+    }
 
     std::size_t DominantBin() const
     {
-        std::size_t best = 1;
-        for (std::size_t k = 2; k < EFFECTIVE_SIZE; ++k)
+        std::size_t lo   = MinBin();
+        std::size_t best = lo;
+        for (std::size_t k = lo + 1; k < EFFECTIVE_SIZE; ++k)
             if (bin_[k] > bin_[best]) best = k;
         return best;
     }
@@ -105,7 +138,8 @@ public:
     double SpectralPurity() const
     {
         double total = 0.0;
-        for (std::size_t k = 1; k < EFFECTIVE_SIZE; ++k) total += bin_[k];
+        std::size_t lo = MinBin();
+        for (std::size_t k = lo; k < EFFECTIVE_SIZE; ++k) total += bin_[k];
         if (total == 0.0) return 0.0;
         return bin_[DominantBin()] / total;
     }
@@ -156,8 +190,10 @@ private:
     std::size_t head_  = 0;
     std::size_t count_ = 0;
 
-    std::array<int64_t, SIZE>          buf_{};
+    std::array<int64_t, SIZE>           buf_{};
     std::array<double,  EFFECTIVE_SIZE> bin_{};
+    std::array<double,  EFFECTIVE_SIZE> re_{};   // running complex DFT bins (real part)
+    std::array<double,  EFFECTIVE_SIZE> im_{};   // running complex DFT bins (imag part)
 
     // Precomputed trig tables shared across all instances of this SIZE
     static TrigTable ComputeTable(double (*fn)(double))
@@ -192,7 +228,6 @@ class FourierPrefetchV1
     struct tracker_entry {
         uint64_t ip           = 0;
         uint64_t last_cl_addr = 0;
-        uint64_t confidence = 0;
         TransformBuf<WINDOW_SIZE> buf{};
 
         // lru_table key interface
@@ -201,25 +236,42 @@ class FourierPrefetchV1
     };
 
     champsim::msl::lru_table<tracker_entry> table_{TRACKER_SETS, TRACKER_WAYS};
+    std::optional<int64_t> pending_delta_;
 
 public:
-    // TransformBuf<WINDOW_SIZE> globalTransformBuf;
-    void update(uint64_t cl_addr, uint64_t ip){
-        TransformBuf<WINDOW_SIZE> tmp;
-        uint64_t confidence = 0;
-        auto found = table_.check_hit({ip, cl_addr, confidence, tmp});
+    void update(uint64_t cl_addr, uint64_t ip)
+    {
+        pending_delta_ = std::nullopt;
+        auto found = table_.check_hit({ip, cl_addr, {}});
 
-        if (found.has_value()){
+        if (found.has_value()) {
             auto stride = static_cast<int64_t>(cl_addr) - static_cast<int64_t>(found->last_cl_addr);
+            // found->buf.Insert(stride);
+            // found->buf.Transform();
+            found->buf.InsertTransform(stride);
+            found->last_cl_addr = cl_addr;
+
+            // if (found->buf.IsMature() && found->buf.SpectralPurity() > SPECTRAL_THRESHOLD) {
+            if (found->buf.SpectralPurity() > SPECTRAL_THRESHOLD) {
+                auto period = found->buf.PeriodOfBin(found->buf.DominantBin());
+                pending_delta_ = found->buf.getSingleDelta(period);
+            }
+
+            table_.fill(*found);
+        } else {
+            table_.fill({ip, cl_addr, {}});
         }
-
     }
 
-    std::optional<int64_t> issue(){
-        return std::nullopt;
+    std::optional<int64_t> issue(uint64_t /*ip*/)
+    {
+        if constexpr (champsim::debug_print) {
+            if (pending_delta_.has_value()) {
+                    std::cout << "[ISSUED OFFSET] " << pending_delta_.value() << std::endl;
+            }
+        }
+        return std::exchange(pending_delta_, std::nullopt);
     }
-
-
 };
 
 } // namespace Transform
