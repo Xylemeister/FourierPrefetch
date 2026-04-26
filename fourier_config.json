@@ -62,7 +62,7 @@
         "max_fill": 2,
         "prefetch_as_load": false,
         "virtual_prefetch": true,
-        "prefetch_activate": "LOAD,PREFETCH",
+        "prefetch_activate": "LOAD,PREFETCH,WRITE",
         "prefetcher": "fourier"
     },
     "L2C": {
