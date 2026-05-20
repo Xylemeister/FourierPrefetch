@@ -73,18 +73,34 @@ constexpr std::size_t MAX_FRONTIER_STEPS = 4 * PREFETCH_DEPTH;
 constexpr std::size_t MIN_CYCLES = 2;
 constexpr std::size_t MAX_PERIOD = WINDOW_SIZE / MIN_CYCLES;
 
-// Acceptance gate on the DoF-adjusted score. A clean period-p signal
-// scores 1 − (p−1)/N here; at PMAX=8 that's 0.56, so 0.50 still admits
-// any clean integer period in [1, PMAX], with a thinner margin at the
-// top end than the N=32 sizing. Tighten to reject partial signals,
-// loosen to catch noisier periodicity at the cost of false positives.
-constexpr double PERIODICITY_THRESHOLD = 0.5;
+// Acceptance gates on the DoF-adjusted score. A clean period-p signal
+// scores 1 − (p−1)/N here; at PMAX=8 that's 0.56, so the L1 gate of
+// 0.50 admits any clean integer period in [1, PMAX].
+//
+// PERIODICITY_L2_THRESHOLD opens a marginal-signal band [L2, L1) whose
+// best period is emitted with fill_here=false → the line fills L2 only.
+// Trade-off: L1 capacity is untouched (so wrong guesses don't pollute
+// the hot path), and a partially-periodic IP still hides ~80 cycles of
+// DRAM latency when we guess right. Set L2 above the random-noise
+// floor of ~1/count (~0.06 at N=16) so noise rarely clears it.
+constexpr double PERIODICITY_THRESHOLD    = 0.5;
+constexpr double PERIODICITY_L2_THRESHOLD = 0.3;
+
+// Per-call cap on non-primary candidates whose deltas are unioned with
+// the primary's. The top (1 + MAX_SECONDARY_CANDIDATES) periods by
+// adjusted score are considered; secondaries are kept only if they
+// clear PERIODICITY_THRESHOLD on their own. Used to widen coverage on
+// IPs whose access pattern carries multiple coexisting periods (e.g.
+// bwaves, where p=4 and p=5 commonly co-fire on the same IP).
+constexpr std::size_t MAX_SECONDARY_CANDIDATES = 1;
 
 struct Prediction {
-    std::vector<int64_t> deltas;
+    std::vector<int64_t> deltas;        // primary period's cumulative offsets
+    std::vector<int64_t> extra_deltas;  // secondary candidates' offsets (dedup'd)
     std::size_t          period      = 0;     // 0 → no usable period
     double               best_score  = 0.0;   // max adjusted score
-    std::size_t          candidates  = 0;     // # periods clearing threshold
+    std::size_t          candidates  = 0;     // # periods clearing L1 threshold
+    bool                 l2_only     = false; // marginal: route primary → L2
 };
 
 template <std::size_t N>
@@ -104,31 +120,33 @@ public:
     // Predict() further caps p at count_ / MIN_CYCLES inside its scan.
     bool IsMature() const { return count_ >= MIN_CYCLES; }
 
-    // Scan p ∈ [1, PMAX]; return the smallest p whose DoF-adjusted score
-    // is maximal AND clears `threshold`. Diagnostics (best_score,
-    // candidates) are populated even when no period passes, so the
-    // caller can split "no structure" from "structure below threshold".
+    // Scan p ∈ [1, PMAX]; populate `deltas` (primary), `extra_deltas`
+    // (top-K secondaries that also clear the L1 threshold), and the
+    // l2_only flag (best score in the marginal band [L2, L1)).
     //
-    // start_step shifts the cyclic replay so the cumulative offsets land
-    // `start_step` cycle positions beyond `cl_addr` instead of starting
-    // at the immediate next line. Callers tracking a per-IP prefetch
-    // frontier pass start_step = (frontier - cl_addr) in cycle-step
-    // units to extend lookahead past the frontier without re-emitting
-    // already-issued lines.
-    Prediction Predict(double      threshold  = PERIODICITY_THRESHOLD,
-                       std::size_t depth      = PREFETCH_DEPTH,
-                       std::size_t start_step = 0) const
+    // start_step shifts the primary replay so the cumulative offsets
+    // land `start_step` cycle positions beyond `cl_addr` instead of
+    // starting at the immediate next line. Secondaries always start at
+    // step 0 — their cycle positions are in a different period than
+    // the frontier-tracked primary, so they're best-effort and the
+    // recent-ring filter handles any address overlap.
+    Prediction Predict(double      threshold     = PERIODICITY_THRESHOLD,
+                       double      l2_threshold  = PERIODICITY_L2_THRESHOLD,
+                       std::size_t depth         = PREFETCH_DEPTH,
+                       std::size_t start_step    = 0,
+                       std::size_t extra_max     = MAX_SECONDARY_CANDIDATES) const
     {
         Prediction out;
         if (depth == 0 || !IsMature()) return out;
         const double total = TotalEnergy();
         if (total <= 0.0) return out;
 
-        std::size_t best_p   = 0;
-        double      best_adj = -1.0;
+        struct Scored { double s_adj; std::size_t p; };
+        std::array<Scored, PMAX> scored{};
+        std::size_t n = 0;
+
         // Cap p at count_/MIN_CYCLES so we never score a period we
-        // haven't observed MIN_CYCLES full cycles of. Equivalent to
-        // gating each p on count_ ≥ MIN_CYCLES · p individually.
+        // haven't observed MIN_CYCLES full cycles of.
         const std::size_t p_max =
             std::min<std::size_t>(PMAX, count_ / MIN_CYCLES);
         for (std::size_t p = 1; p <= p_max; ++p) {
@@ -136,18 +154,45 @@ public:
             const double s_adj = s_raw - static_cast<double>(p - 1)
                                        / static_cast<double>(count_);
             if (s_adj >= threshold) ++out.candidates;
-            // Strict > on adjusted; ties resolve to smaller p (loop order).
-            if (s_adj > best_adj) {
-                best_adj = s_adj;
-                best_p   = p;
+            scored[n++] = {s_adj, p};
+        }
+        if (n == 0) return out;
+
+        // Order the top (1 + extra_max) by adjusted score; ties go to
+        // the smaller p (the fundamental, since P_p ⊆ P_{kp}).
+        const std::size_t want = std::min<std::size_t>(n, 1 + extra_max);
+        std::partial_sort(scored.begin(), scored.begin() + want,
+                          scored.begin() + n,
+                          [](const Scored& a, const Scored& b) {
+                              return a.s_adj > b.s_adj
+                                  || (a.s_adj == b.s_adj && a.p < b.p);
+                          });
+
+        out.best_score = scored[0].s_adj;
+        if (scored[0].s_adj < l2_threshold) return out;
+
+        out.period  = scored[0].p;
+        out.deltas  = CyclicReplay(scored[0].p, depth, start_step);
+        out.l2_only = (scored[0].s_adj < threshold);
+        if (out.l2_only) return out;  // marginal-signal: skip secondaries
+
+        // Append cumulative offsets from each remaining candidate that
+        // still clears the L1 threshold. Dedup against `deltas` so we
+        // never emit the same cycle-position twice in one call; the
+        // recent-ring filter handles cross-call overlap.
+        for (std::size_t k = 1; k < want; ++k) {
+            if (scored[k].s_adj < threshold) break;
+            if (scored[k].p == scored[0].p) continue;
+            const auto sd = CyclicReplay(scored[k].p, depth, /*start_step=*/0);
+            for (int64_t d : sd) {
+                bool dup = false;
+                for (int64_t dp : out.deltas) {
+                    if (dp == d) { dup = true; break; }
+                }
+                if (!dup) out.extra_deltas.push_back(d);
             }
         }
 
-        out.best_score = best_adj;
-        if (best_adj < threshold || best_p == 0) return out;
-
-        out.period = best_p;
-        out.deltas = CyclicReplay(best_p, depth, start_step);
         return out;
     }
 

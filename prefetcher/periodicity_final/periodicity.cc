@@ -156,6 +156,8 @@ struct Stats {
     uint64_t predict_called       = 0;
     uint64_t no_signal            = 0;
     uint64_t emitted              = 0;
+    uint64_t pred_l2_only         = 0;     // Predict returned l2_only=true
+    uint64_t pred_with_extras     = 0;     // Predict returned non-empty extras
 
     // Indexed by period value; entry 0 is never written.
     std::array<uint64_t,
@@ -170,6 +172,11 @@ struct Stats {
     uint64_t emit_accepted        = 0;
     uint64_t emit_page_filtered   = 0;
     uint64_t emit_recent_filtered = 0;
+
+    uint64_t l2_attempts          = 0;     // marginal-band L2-only emits
+    uint64_t l2_accepted          = 0;
+    uint64_t extra_attempts       = 0;     // secondary-candidate emits
+    uint64_t extra_accepted       = 0;
 
     uint64_t origins_recorded     = 0;
     uint64_t useful_credits       = 0;
@@ -243,6 +250,8 @@ public:
         std::cout << "predict_called       : " << stats_.predict_called       << '\n';
         std::cout << "no_signal            : " << stats_.no_signal            << '\n';
         std::cout << "emitted              : " << stats_.emitted              << '\n';
+        std::cout << "pred_l2_only         : " << stats_.pred_l2_only         << '\n';
+        std::cout << "pred_with_extras     : " << stats_.pred_with_extras     << '\n';
 
         std::cout << "period_hist          :";
         for (std::size_t p = 1; p < stats_.period_hist.size(); ++p)
@@ -261,6 +270,10 @@ public:
         std::cout << "emit_accepted        : " << stats_.emit_accepted        << '\n';
         std::cout << "emit_page_filtered   : " << stats_.emit_page_filtered   << '\n';
         std::cout << "emit_recent_filtered : " << stats_.emit_recent_filtered << '\n';
+        std::cout << "l2_attempts          : " << stats_.l2_attempts          << '\n';
+        std::cout << "l2_accepted          : " << stats_.l2_accepted          << '\n';
+        std::cout << "extra_attempts       : " << stats_.extra_attempts       << '\n';
+        std::cout << "extra_accepted       : " << stats_.extra_accepted       << '\n';
         std::cout << "origins_recorded     : " << stats_.origins_recorded     << '\n';
         std::cout << "useful_credits       : " << stats_.useful_credits       << '\n';
         std::cout << "useful_lost          : " << stats_.useful_lost          << '\n';
@@ -299,13 +312,7 @@ public:
         } else if (found->frontier_step >= periodicity::MAX_FRONTIER_STEPS) {
             ++stats_.frontier_saturated;
         } else {
-            auto counting_emit = [this, &emit](uint64_t pf_addr) -> bool {
-                ++stats_.emit_attempts;
-                const bool ok = emit(pf_addr);
-                if (ok) ++stats_.emit_accepted;
-                return ok;
-            };
-            EmitPredictions(*found, cl_addr, ip, demand_page, counting_emit);
+            EmitPredictions(*found, cl_addr, ip, demand_page, emit);
         }
 
         table_.fill(*found);
@@ -344,6 +351,7 @@ private:
         ++stats_.predict_called;
         const auto pred = e.buf.Predict(
             periodicity::PERIODICITY_THRESHOLD,
+            periodicity::PERIODICITY_L2_THRESHOLD,
             periodicity::PREFETCH_DEPTH,
             e.frontier_step);
 
@@ -354,15 +362,54 @@ private:
             return;
         }
         BumpPeriodHist(pred.period);
-        if (!pred.deltas.empty()) ++stats_.emitted;
 
-        // Furthest-first emission. Under MSHR pressure, the deepest
-        // lookahead is the most valuable line to get in flight: it has
-        // the longest latency to amortise, and closer lines have more
-        // chance to be re-attempted (or demand-issued) on the next
-        // cycle. Advance the frontier to the highest cycle position we
-        // managed to handle — gaps below it are skipped, on the bet
-        // that the demand stream will pick them up cheaply.
+        // Marginal-signal path: emit the primary period's deltas to L2
+        // only. No frontier advancement (next high-confidence call
+        // should still produce L1 emissions at these positions) and no
+        // origin recording (L2 fills don't trigger L1's useful_prefetch
+        // hook, so attribution would always look "useless" and skew
+        // the throttle).
+        if (pred.l2_only) {
+            ++stats_.pred_l2_only;
+            for (auto it = pred.deltas.rbegin();
+                 it != pred.deltas.rend(); ++it) {
+                const int64_t d = *it;
+                if (d == 0) continue;
+
+                const uint64_t pf_cl   = static_cast<uint64_t>(
+                                             static_cast<int64_t>(cl_addr) + d);
+                const uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
+
+                if ((pf_addr >> LOG2_PAGE_SIZE) != demand_page) {
+                    ++stats_.emit_page_filtered;
+                    continue;
+                }
+                if (e.recent.Contains(pf_cl)) {
+                    ++stats_.emit_recent_filtered;
+                    continue;
+                }
+
+                ++stats_.l2_attempts;
+                if (emit(pf_addr, /*l2_only=*/true)) {
+                    ++stats_.l2_accepted;
+                    e.recent.Push(pf_cl);
+                } else {
+                    break;
+                }
+            }
+            return;
+        }
+
+        if (!pred.deltas.empty())       ++stats_.emitted;
+        if (!pred.extra_deltas.empty()) ++stats_.pred_with_extras;
+
+        // Primary L1 path: furthest-first emission with frontier
+        // accounting. Under MSHR pressure, the deepest lookahead is the
+        // most valuable line to get in flight — it has the longest
+        // latency to amortise, and closer lines have more chance to be
+        // re-attempted (or demand-issued) on the next cycle. Advance
+        // the frontier to the highest cycle position we managed to
+        // handle; gaps below it are skipped.
         std::size_t advance    = 0;
         bool        cache_full = false;
         const std::size_t depth = pred.deltas.size();
@@ -391,7 +438,9 @@ private:
                 continue;
             }
 
-            if (emit(pf_addr)) {
+            ++stats_.emit_attempts;
+            if (emit(pf_addr, /*l2_only=*/false)) {
+                ++stats_.emit_accepted;
                 e.recent.Push(pf_cl);
                 origins_.Record(pf_cl, ip);
                 ++stats_.origins_recorded;
@@ -405,6 +454,40 @@ private:
                                    + advance;
         e.frontier_step = static_cast<uint16_t>(
             std::min<std::size_t>(new_step, periodicity::MAX_FRONTIER_STEPS));
+
+        // Secondary candidates: best-effort, no frontier accounting.
+        // These already cleared the L1 threshold on their own period,
+        // so they go to L1 as well. Furthest-first within the extras
+        // list keeps the same MSHR-resilience principle.
+        if (cache_full) return;
+        for (auto it = pred.extra_deltas.rbegin();
+             it != pred.extra_deltas.rend(); ++it) {
+            const int64_t d = *it;
+            if (d == 0) continue;
+
+            const uint64_t pf_cl   = static_cast<uint64_t>(
+                                         static_cast<int64_t>(cl_addr) + d);
+            const uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
+
+            if ((pf_addr >> LOG2_PAGE_SIZE) != demand_page) {
+                ++stats_.emit_page_filtered;
+                continue;
+            }
+            if (e.recent.Contains(pf_cl)) {
+                ++stats_.emit_recent_filtered;
+                continue;
+            }
+
+            ++stats_.extra_attempts;
+            if (emit(pf_addr, /*l2_only=*/false)) {
+                ++stats_.extra_accepted;
+                e.recent.Push(pf_cl);
+                origins_.Record(pf_cl, ip);
+                ++stats_.origins_recorded;
+            } else {
+                break;
+            }
+        }
     }
 
     void BumpPeriodHist(std::size_t period)
@@ -449,9 +532,9 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
     if (useful_prefetch) engine.OnUseful(cl_addr);
 
     engine.Update(cl_addr, ip, demand_page,
-        [this](uint64_t pf_addr) -> bool {
-            const bool fill_here =
-                this->get_mshr_occupancy_ratio() < MSHR_DEMOTE_RATIO;
+        [this](uint64_t pf_addr, bool l2_only) -> bool {
+            const bool fill_here = !l2_only
+                && this->get_mshr_occupancy_ratio() < MSHR_DEMOTE_RATIO;
             return prefetch_line(pf_addr, fill_here, 0);
         });
 
