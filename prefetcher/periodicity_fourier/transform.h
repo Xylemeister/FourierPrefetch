@@ -2,6 +2,7 @@
 #define PERIODICITY_FOURIER_TRANSFORM_H
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -55,6 +56,34 @@ private:
     int64_t AtValid(std::size_t j) const
     {
         return buf_[(head_ + N - count_ + j) % N];
+    }
+
+    double TotalEnergy() const
+    {
+        double s = 0.0;
+        for (std::size_t j = 0; j < count_; ++j) {
+            const double x = static_cast<double>(AtValid(j));
+            s += x * x;
+        }
+        return s;
+    }
+
+    double ProjectionEnergy(std::size_t p) const
+    {
+        double acc = 0.0;
+        for (std::size_t k = 0; k < p; ++k) {
+            const double omega = 2.0 * M_PI * static_cast<double>(k)
+                               / static_cast<double>(p);
+            double re = 0.0, im = 0.0;
+            for (std::size_t j = 0; j < count_; ++j) {
+                const double x     = static_cast<double>(AtValid(j));
+                const double phase = omega * static_cast<double>(j);
+                re += x * std::cos(phase);
+                im -= x * std::sin(phase);
+            }
+            acc += re * re + im * im;
+        }
+        return acc / static_cast<double>(count_);
     }
 };
 
