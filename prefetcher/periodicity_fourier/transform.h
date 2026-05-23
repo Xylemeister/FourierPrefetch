@@ -1,6 +1,7 @@
 #ifndef PERIODICITY_FOURIER_TRANSFORM_H
 #define PERIODICITY_FOURIER_TRANSFORM_H
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -45,6 +46,45 @@ public:
     }
 
     bool IsMature() const { return count_ >= MIN_CYCLES; }
+
+    Prediction Predict(double      threshold     = PERIODICITY_THRESHOLD,
+                       double      l2_threshold  = PERIODICITY_L2_THRESHOLD,
+                       std::size_t depth         = PREFETCH_DEPTH) const
+    {
+        Prediction out;
+        if (depth == 0 || !IsMature()) return out;
+        const double total = TotalEnergy();
+        if (total <= 0.0) return out;
+
+        struct Scored { double s_adj; std::size_t p; };
+        std::array<Scored, PMAX> scored{};
+        std::size_t n = 0;
+
+        const std::size_t p_max =
+            std::min<std::size_t>(PMAX, count_ / MIN_CYCLES);
+        for (std::size_t p = 1; p <= p_max; ++p) {
+            const double s_raw = ProjectionEnergy(p) / total;
+            const double s_adj = s_raw - static_cast<double>(p - 1)
+                                       / static_cast<double>(count_);
+            if (s_adj >= threshold) ++out.candidates;
+            scored[n++] = {s_adj, p};
+        }
+        if (n == 0) return out;
+
+        std::partial_sort(scored.begin(), scored.begin() + 1,
+                          scored.begin() + n,
+                          [](const Scored& a, const Scored& b) {
+                              return a.s_adj > b.s_adj
+                                  || (a.s_adj == b.s_adj && a.p < b.p);
+                          });
+
+        out.best_score = scored[0].s_adj;
+        if (scored[0].s_adj < l2_threshold) return out;
+
+        out.period  = scored[0].p;
+        out.l2_only = (scored[0].s_adj < threshold);
+        return out;
+    }
 
 private:
     std::array<int64_t, N> buf_{};
