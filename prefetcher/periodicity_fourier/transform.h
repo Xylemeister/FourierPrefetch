@@ -1,7 +1,6 @@
 #ifndef PERIODICITY_FOURIER_TRANSFORM_H
 #define PERIODICITY_FOURIER_TRANSFORM_H
 
-#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -49,7 +48,9 @@ public:
 
     Prediction Predict(double      threshold     = PERIODICITY_THRESHOLD,
                        double      l2_threshold  = PERIODICITY_L2_THRESHOLD,
-                       std::size_t depth         = PREFETCH_DEPTH) const
+                       std::size_t depth         = PREFETCH_DEPTH,
+                       std::size_t start_step    = 0,
+                       std::size_t extra_max     = MAX_SECONDARY_CANDIDATES) const
     {
         Prediction out;
         if (depth == 0 || !IsMature()) return out;
@@ -71,7 +72,8 @@ public:
         }
         if (n == 0) return out;
 
-        std::partial_sort(scored.begin(), scored.begin() + 1,
+        const std::size_t want = std::min<std::size_t>(n, 1 + extra_max);
+        std::partial_sort(scored.begin(), scored.begin() + want,
                           scored.begin() + n,
                           [](const Scored& a, const Scored& b) {
                               return a.s_adj > b.s_adj
@@ -82,7 +84,23 @@ public:
         if (scored[0].s_adj < l2_threshold) return out;
 
         out.period  = scored[0].p;
+        out.deltas  = CyclicReplay(scored[0].p, depth, start_step);
         out.l2_only = (scored[0].s_adj < threshold);
+        if (out.l2_only) return out;
+
+        for (std::size_t k = 1; k < want; ++k) {
+            if (scored[k].s_adj < threshold) break;
+            if (scored[k].p == scored[0].p) continue;
+            const auto sd = CyclicReplay(scored[k].p, depth, 0);
+            for (int64_t d : sd) {
+                bool dup = false;
+                for (int64_t dp : out.deltas) {
+                    if (dp == d) { dup = true; break; }
+                }
+                if (!dup) out.extra_deltas.push_back(d);
+            }
+        }
+
         return out;
     }
 
@@ -124,6 +142,23 @@ private:
             acc += re * re + im * im;
         }
         return acc / static_cast<double>(count_);
+    }
+
+    std::vector<int64_t>
+    CyclicReplay(std::size_t period, std::size_t depth,
+                 std::size_t start_step) const
+    {
+        std::vector<int64_t> out;
+        out.reserve(depth);
+        int64_t cumulative = 0;
+        for (std::size_t i = 0; i < start_step; ++i) {
+            cumulative += At(N - period + (i % period));
+        }
+        for (std::size_t i = 0; i < depth; ++i) {
+            cumulative += At(N - period + ((start_step + i) % period));
+            out.push_back(cumulative);
+        }
+        return out;
     }
 };
 
