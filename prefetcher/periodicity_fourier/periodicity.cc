@@ -1,5 +1,8 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <iostream>
+#include <string>
 #include <unordered_map>
 
 #include "cache.h"
@@ -60,6 +63,38 @@ public:
     }
 };
 
+struct Stats {
+    uint64_t updates              = 0;
+    uint64_t miss_table           = 0;
+    uint64_t not_mature           = 0;
+    uint64_t frontier_saturated   = 0;
+
+    uint64_t predict_called       = 0;
+    uint64_t no_signal            = 0;
+    uint64_t emitted              = 0;
+    uint64_t pred_l2_only         = 0;
+    uint64_t pred_with_extras     = 0;
+
+    std::array<uint64_t,
+        periodicity::PeriodicityBuf<periodicity::WINDOW_SIZE>::PMAX + 1>
+        period_hist{};
+    std::array<uint64_t, 11> score_hist{};
+
+    uint64_t emit_attempts        = 0;
+    uint64_t emit_accepted        = 0;
+    uint64_t emit_page_filtered   = 0;
+    uint64_t emit_pf_filtered     = 0;
+
+    uint64_t l2_attempts          = 0;
+    uint64_t l2_accepted          = 0;
+    uint64_t extra_attempts       = 0;
+    uint64_t extra_accepted       = 0;
+
+    uint64_t c_total              = 0;
+    uint64_t c_useful             = 0;
+    uint64_t evicted_unused       = 0;
+};
+
 class PeriodicityPrefetcher
 {
     struct Entry {
@@ -74,17 +109,75 @@ class PeriodicityPrefetcher
 
     champsim::msl::lru_table<Entry> table_{TRACKER_SETS, TRACKER_WAYS};
     PrefetchFilter                  pf_{};
+    Stats                           stats_{};
 
 public:
+    void OnUseful(uint64_t cl_addr)
+    {
+        if (pf_.MarkUseful(cl_addr)) ++stats_.c_useful;
+    }
+
+    void OnEvict(uint64_t cl_addr)
+    {
+        if (pf_.Evict(cl_addr)) ++stats_.evicted_unused;
+    }
+
+    void PrintStats(const std::string& name) const
+    {
+        std::cout << "\n=== Periodicity-optimized prefetcher stats (" << name << ") ===\n";
+        std::cout << "updates              : " << stats_.updates              << '\n';
+        std::cout << "miss_table (new IPs) : " << stats_.miss_table           << '\n';
+        std::cout << "not_mature           : " << stats_.not_mature           << '\n';
+        std::cout << "frontier_saturated   : " << stats_.frontier_saturated   << '\n';
+        std::cout << "predict_called       : " << stats_.predict_called       << '\n';
+        std::cout << "no_signal            : " << stats_.no_signal            << '\n';
+        std::cout << "emitted              : " << stats_.emitted              << '\n';
+        std::cout << "pred_l2_only         : " << stats_.pred_l2_only         << '\n';
+        std::cout << "pred_with_extras     : " << stats_.pred_with_extras     << '\n';
+
+        std::cout << "period_hist          :";
+        for (std::size_t p = 1; p < stats_.period_hist.size(); ++p)
+            std::cout << " p" << p << '=' << stats_.period_hist[p];
+        std::cout << '\n';
+
+        std::cout << "score_hist           :";
+        for (std::size_t i = 0; i < stats_.score_hist.size(); ++i) {
+            const double lo = static_cast<double>(i)     / 10.0;
+            const double hi = static_cast<double>(i + 1) / 10.0;
+            std::cout << ' ' << lo << '-' << hi << '=' << stats_.score_hist[i];
+        }
+        std::cout << '\n';
+
+        std::cout << "emit_attempts        : " << stats_.emit_attempts        << '\n';
+        std::cout << "emit_accepted        : " << stats_.emit_accepted        << '\n';
+        std::cout << "emit_page_filtered   : " << stats_.emit_page_filtered   << '\n';
+        std::cout << "emit_pf_filtered     : " << stats_.emit_pf_filtered     << '\n';
+        std::cout << "l2_attempts          : " << stats_.l2_attempts          << '\n';
+        std::cout << "l2_accepted          : " << stats_.l2_accepted          << '\n';
+        std::cout << "extra_attempts       : " << stats_.extra_attempts       << '\n';
+        std::cout << "extra_accepted       : " << stats_.extra_accepted       << '\n';
+        std::cout << "c_total              : " << stats_.c_total              << '\n';
+        std::cout << "c_useful             : " << stats_.c_useful             << '\n';
+        std::cout << "evicted_unused       : " << stats_.evicted_unused       << '\n';
+        if (stats_.c_total > 0) {
+            const double acc = static_cast<double>(stats_.c_useful)
+                             / static_cast<double>(stats_.c_total);
+            std::cout << "accuracy (C_useful/C_total) : " << acc << '\n';
+        }
+    }
+
     template <typename EmitFn>
     void Update(uint64_t cl_addr, uint64_t ip, uint64_t demand_page,
                 EmitFn&& emit)
     {
+        ++stats_.updates;
+
         Entry probe;
         probe.ip = ip;
         auto found = table_.check_hit(probe);
 
         if (!found) {
+            ++stats_.miss_table;
             Entry seed;
             seed.ip           = ip;
             seed.last_cl_addr = cl_addr;
@@ -95,8 +188,11 @@ public:
         AdvanceStream(*found, cl_addr);
         if (found->frontier_step > 0) --found->frontier_step;
 
-        if (found->buf.IsMature()
-            && found->frontier_step < periodicity::MAX_FRONTIER_STEPS) {
+        if (!found->buf.IsMature()) {
+            ++stats_.not_mature;
+        } else if (found->frontier_step >= periodicity::MAX_FRONTIER_STEPS) {
+            ++stats_.frontier_saturated;
+        } else {
             EmitPredictions(*found, cl_addr, demand_page, emit);
         }
 
@@ -116,13 +212,53 @@ private:
     void EmitPredictions(Entry& e, uint64_t cl_addr,
                          uint64_t demand_page, EmitFn& emit)
     {
+        ++stats_.predict_called;
         const auto pred = e.buf.Predict(
             periodicity::PERIODICITY_THRESHOLD,
             periodicity::PERIODICITY_L2_THRESHOLD,
             periodicity::PREFETCH_DEPTH,
             e.frontier_step);
 
-        if (pred.period == 0) return;
+        BumpScoreHist(pred.best_score);
+
+        if (pred.period == 0) {
+            ++stats_.no_signal;
+            return;
+        }
+        BumpPeriodHist(pred.period);
+
+        if (pred.l2_only) {
+            ++stats_.pred_l2_only;
+            for (auto it = pred.deltas.rbegin();
+                 it != pred.deltas.rend(); ++it) {
+                const int64_t d = *it;
+                if (d == 0) continue;
+
+                const uint64_t pf_cl   = static_cast<uint64_t>(
+                                             static_cast<int64_t>(cl_addr) + d);
+                const uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
+
+                if ((pf_addr >> LOG2_PAGE_SIZE) != demand_page) {
+                    ++stats_.emit_page_filtered;
+                    continue;
+                }
+                if (pf_.Contains(pf_cl)) {
+                    ++stats_.emit_pf_filtered;
+                    continue;
+                }
+
+                ++stats_.l2_attempts;
+                if (emit(pf_addr, true)) {
+                    ++stats_.l2_accepted;
+                } else {
+                    break;
+                }
+            }
+            return;
+        }
+
+        if (!pred.deltas.empty())       ++stats_.emitted;
+        if (!pred.extra_deltas.empty()) ++stats_.pred_with_extras;
 
         std::size_t advance    = 0;
         bool        cache_full = false;
@@ -142,16 +278,21 @@ private:
             const uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
 
             if ((pf_addr >> LOG2_PAGE_SIZE) != demand_page) {
+                ++stats_.emit_page_filtered;
                 handled();
                 continue;
             }
             if (pf_.Contains(pf_cl)) {
+                ++stats_.emit_pf_filtered;
                 handled();
                 continue;
             }
 
+            ++stats_.emit_attempts;
             if (emit(pf_addr, false)) {
+                ++stats_.emit_accepted;
                 pf_.Insert(pf_cl);
+                ++stats_.c_total;
                 handled();
             } else {
                 cache_full = true;
@@ -162,6 +303,49 @@ private:
                                    + advance;
         e.frontier_step = static_cast<uint16_t>(
             std::min<std::size_t>(new_step, periodicity::MAX_FRONTIER_STEPS));
+
+        if (cache_full) return;
+        for (auto it = pred.extra_deltas.rbegin();
+             it != pred.extra_deltas.rend(); ++it) {
+            const int64_t d = *it;
+            if (d == 0) continue;
+
+            const uint64_t pf_cl   = static_cast<uint64_t>(
+                                         static_cast<int64_t>(cl_addr) + d);
+            const uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
+
+            if ((pf_addr >> LOG2_PAGE_SIZE) != demand_page) {
+                ++stats_.emit_page_filtered;
+                continue;
+            }
+            if (pf_.Contains(pf_cl)) {
+                ++stats_.emit_pf_filtered;
+                continue;
+            }
+
+            ++stats_.extra_attempts;
+            if (emit(pf_addr, false)) {
+                ++stats_.extra_accepted;
+                pf_.Insert(pf_cl);
+                ++stats_.c_total;
+            } else {
+                break;
+            }
+        }
+    }
+
+    void BumpPeriodHist(std::size_t period)
+    {
+        if (period < stats_.period_hist.size())
+            ++stats_.period_hist[period];
+    }
+
+    void BumpScoreHist(double score)
+    {
+        long bucket = static_cast<long>(std::floor(score * 10.0));
+        if (bucket < 0) bucket = 0;
+        if (bucket > 10) bucket = 10;
+        ++stats_.score_hist[static_cast<std::size_t>(bucket)];
     }
 };
 
@@ -176,7 +360,7 @@ void CACHE::prefetcher_initialize()
 
 uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
                                          uint8_t /*cache_hit*/,
-                                         bool /*useful_prefetch*/,
+                                         bool useful_prefetch,
                                          uint8_t /*type*/,
                                          uint32_t metadata_in)
 {
@@ -184,6 +368,9 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
     const uint64_t demand_page = addr >> LOG2_PAGE_SIZE;
 
     auto& engine = engines[this];
+
+    if (useful_prefetch) engine.OnUseful(cl_addr);
+
     engine.Update(cl_addr, ip, demand_page,
         [this](uint64_t pf_addr, bool l2_only) -> bool {
             const bool fill_here = !l2_only
@@ -198,10 +385,16 @@ void CACHE::prefetcher_cycle_operate() {}
 
 uint32_t CACHE::prefetcher_cache_fill(uint64_t /*addr*/, uint32_t /*set*/,
                                       uint32_t /*way*/, uint8_t /*prefetch*/,
-                                      uint64_t /*evicted_addr*/,
+                                      uint64_t evicted_addr,
                                       uint32_t metadata_in)
 {
+    if (evicted_addr != 0)
+        engines[this].OnEvict(evicted_addr >> LOG2_BLOCK_SIZE);
     return metadata_in;
 }
 
-void CACHE::prefetcher_final_stats() {}
+void CACHE::prefetcher_final_stats()
+{
+    auto it = engines.find(this);
+    if (it != engines.end()) it->second.PrintStats(this->NAME);
+}
