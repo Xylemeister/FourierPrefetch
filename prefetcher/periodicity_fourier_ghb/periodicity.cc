@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 
@@ -6,10 +7,22 @@
 
 namespace {
 
+constexpr std::size_t GHB_SIZE = 512;
+
 constexpr double MSHR_DEMOTE_RATIO = 0.5;
 
 class PeriodicityPrefetcher
 {
+    struct GhbEntry {
+        uint64_t pc       = 0;
+        int64_t  delta    = 0;
+        uint64_t seq      = 0;
+        uint64_t prev_seq = 0;
+    };
+
+    std::array<GhbEntry, GHB_SIZE> ghb_{};
+    uint64_t                       next_seq_ = 1;
+
 public:
     template <typename EmitFn>
     void Update(uint64_t /*cl_addr*/, uint64_t /*ip*/, uint64_t /*demand_page*/,
