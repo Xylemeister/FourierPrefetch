@@ -8,6 +8,8 @@
 namespace {
 
 constexpr std::size_t GHB_SIZE = 512;
+constexpr std::size_t IT_SIZE  = 512;
+constexpr std::size_t IT_MASK  = IT_SIZE - 1;
 
 constexpr double MSHR_DEMOTE_RATIO = 0.5;
 
@@ -20,7 +22,16 @@ class PeriodicityPrefetcher
         uint64_t prev_seq = 0;
     };
 
+    struct ItEntry {
+        uint64_t pc            = 0;
+        uint64_t last_cl_addr  = 0;
+        uint64_t last_seq      = 0;
+        uint16_t frontier_step = 0;
+        bool     valid         = false;
+    };
+
     std::array<GhbEntry, GHB_SIZE> ghb_{};
+    std::array<ItEntry,  IT_SIZE>  it_{};
     uint64_t                       next_seq_ = 1;
 
 public:
