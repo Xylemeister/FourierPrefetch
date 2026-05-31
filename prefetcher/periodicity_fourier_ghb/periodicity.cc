@@ -36,9 +36,34 @@ class PeriodicityPrefetcher
 
 public:
     template <typename EmitFn>
-    void Update(uint64_t /*cl_addr*/, uint64_t /*ip*/, uint64_t /*demand_page*/,
+    void Update(uint64_t cl_addr, uint64_t ip, uint64_t /*demand_page*/,
                 EmitFn&& /*emit*/)
     {
+        ItEntry& it = it_[ip & IT_MASK];
+        const bool it_hit = it.valid && it.pc == ip;
+
+        if (!it_hit) {
+            it.valid         = true;
+            it.pc            = ip;
+            it.last_cl_addr  = cl_addr;
+            it.last_seq      = 0;
+            it.frontier_step = 0;
+            return;
+        }
+
+        const int64_t delta = static_cast<int64_t>(cl_addr)
+                            - static_cast<int64_t>(it.last_cl_addr);
+        it.last_cl_addr = cl_addr;
+
+        const uint64_t s = next_seq_++;
+        GhbEntry& ge  = ghb_[s % GHB_SIZE];
+        ge.pc       = ip;
+        ge.delta    = delta;
+        ge.seq      = s;
+        ge.prev_seq = it.last_seq;
+        it.last_seq = s;
+
+        if (it.frontier_step > 0) --it.frontier_step;
     }
 };
 
