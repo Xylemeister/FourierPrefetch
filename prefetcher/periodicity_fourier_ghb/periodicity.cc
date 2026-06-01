@@ -64,6 +64,30 @@ public:
         it.last_seq = s;
 
         if (it.frontier_step > 0) --it.frontier_step;
+
+        auto window = ReconstructWindow(ip, s);
+        (void)window;
+    }
+
+private:
+    periodicity::PeriodicityBuf<periodicity::WINDOW_SIZE>
+    ReconstructWindow(uint64_t pc, uint64_t head_seq) const
+    {
+        std::array<int64_t, periodicity::WINDOW_SIZE> tmp{};
+        std::size_t n = 0;
+
+        uint64_t s = head_seq;
+        while (s != 0 && n < periodicity::WINDOW_SIZE) {
+            const GhbEntry& e = ghb_[s % GHB_SIZE];
+            if (e.seq != s || e.pc != pc) break;
+            tmp[n++] = e.delta;
+            s = e.prev_seq;
+        }
+
+        periodicity::PeriodicityBuf<periodicity::WINDOW_SIZE> w;
+        for (std::size_t i = n; i-- > 0;)
+            w.Insert(tmp[i]);
+        return w;
     }
 };
 
