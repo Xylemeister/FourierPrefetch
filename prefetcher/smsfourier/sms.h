@@ -6,8 +6,8 @@
 
 #include <bitset>
 #include <cassert>
-#include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace smsf_space
@@ -160,6 +160,72 @@ namespace smsf_space
 
   struct PBData {
     SpatialPattern pending;
+  };
+
+  class SMS {
+  public:
+    SMS();
+
+    void access(uint64_t block_number, uint64_t pc);
+    uint32_t prefetch(CACHE* cache, uint64_t block_number, uint32_t metadata_in);
+    void eviction(uint64_t block_number);
+
+    uint64_t pht_lookups        = 0;
+    uint64_t pht_hits           = 0;
+    uint64_t generations        = 0;
+    uint64_t prefetches_issued    = 0;
+    uint64_t prefetches_blocked   = 0;
+    uint64_t prefetches_l2_filled = 0;
+    uint64_t prefetches_llc_only  = 0;
+    uint64_t useful_prefetches    = 0;
+
+    uint64_t comp_total                = 0;
+    uint64_t comp_kept                 = 0;
+    uint64_t comp_dropped_empty        = 0;
+    uint64_t comp_dropped_no_period    = 0;
+    uint64_t comp_dropped_period_large = 0;
+    uint64_t comp_dropped_coverage     = 0;
+
+    uint64_t comp_period_hist[CompactPattern::MAX_PERIOD + 1] = {0};
+
+    std::unordered_map<uint16_t, uint64_t> stencil_hist;
+
+    static constexpr std::size_t POP_BUCKETS = 8;
+    uint64_t popcount_hist[POP_BUCKETS] = {0};
+
+    uint64_t set_bits_total           = 0;
+    uint64_t set_bits_kept            = 0;
+    uint64_t set_bits_reconstructed   = 0;
+    uint64_t set_bits_spurious        = 0;
+
+    uint64_t storage_bits_raw_basis   = 0;
+    uint64_t storage_bits_actual      = 0;
+
+    double   score_sum                = 0.0;
+    uint64_t score_count              = 0;
+
+  private:
+    SetAssocCache<FTData>  ft;
+    SetAssocCache<ATData>  at;
+    SetAssocCache<PHTData> pht;
+    SetAssocCache<PBData>  pb;
+
+    SpatialPattern find_in_pht(uint64_t pc, uint32_t offset);
+    void           insert_in_pht(uint64_t pc, uint32_t offset, const SpatialPattern& pat);
+
+    CompactPattern compress(const SpatialPattern& pat, uint8_t trigger_offset);
+
+    static uint64_t region_of(uint64_t block_number) {
+      return block_number >> LOG2_REGION_BLOCKS;
+    }
+    static uint32_t offset_of(uint64_t block_number) {
+      return static_cast<uint32_t>(block_number & (REGION_BLOCKS - 1));
+    }
+    static uint64_t make_pht_key(uint64_t pc, uint32_t offset) {
+      pc     &= (1ULL << PC_WIDTH)   - 1;
+      offset &= (1U   << ADDR_WIDTH) - 1;
+      return (pc << ADDR_WIDTH) | offset;
+    }
   };
 } // namespace smsf_space
 
