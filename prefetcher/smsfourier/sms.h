@@ -5,8 +5,10 @@
 #include "transform.h"
 
 #include <bitset>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace smsf_space
 {
@@ -51,6 +53,113 @@ namespace smsf_space
       if (!valid) return 0;
       return 1 + 6 + 3 + std::size_t{period};
     }
+  };
+
+  template <typename Data>
+  class SetAssocCache {
+  public:
+    struct Entry {
+      bool     valid = false;
+      uint64_t key   = 0;
+      Data     data{};
+      uint64_t lru   = 0;
+    };
+
+    SetAssocCache(uint32_t n_entries, uint32_t n_ways)
+      : num_ways(n_ways),
+        num_sets(n_entries / n_ways),
+        table(num_sets, std::vector<Entry>(n_ways))
+    {
+      assert(n_entries % n_ways == 0);
+      assert(num_sets > 0);
+    }
+
+    Entry* find(uint64_t key)
+    {
+      for (auto& e : table[set_of(key)]) {
+        if (e.valid && e.key == key) return &e;
+      }
+      return nullptr;
+    }
+
+    Entry insert(uint64_t key, const Data& data)
+    {
+      auto& set = table[set_of(key)];
+      Entry* victim     = nullptr;
+      uint64_t min_lru  = UINT64_MAX;
+
+      for (auto& e : set) {
+        if (e.valid && e.key == key) {
+          e.data = data;
+          e.lru  = ++lru_counter;
+          return Entry{};
+        }
+        if (!e.valid) {
+          e.valid = true;
+          e.key   = key;
+          e.data  = data;
+          e.lru   = ++lru_counter;
+          return Entry{};
+        }
+        if (e.lru < min_lru) { min_lru = e.lru; victim = &e; }
+      }
+      Entry evicted = *victim;
+      victim->key  = key;
+      victim->data = data;
+      victim->lru  = ++lru_counter;
+      return evicted;
+    }
+
+    void touch(uint64_t key)
+    {
+      if (Entry* e = find(key)) e->lru = ++lru_counter;
+    }
+
+    Entry erase(uint64_t key)
+    {
+      for (auto& e : table[set_of(key)]) {
+        if (e.valid && e.key == key) {
+          Entry erased = e;
+          e.valid = false;
+          return erased;
+        }
+      }
+      return Entry{};
+    }
+
+  private:
+    uint32_t set_of(uint64_t key) const
+    {
+      uint64_t h = key;
+      h ^= h >> 21;
+      h ^= h >> 13;
+      h ^= h >> 7;
+      return static_cast<uint32_t>(h % num_sets);
+    }
+
+    uint32_t num_ways;
+    uint32_t num_sets;
+    std::vector<std::vector<Entry>> table;
+    uint64_t lru_counter = 0;
+  };
+
+  struct FTData {
+    uint64_t pc;
+    uint32_t offset;
+  };
+
+  struct ATData {
+    uint64_t       pc;
+    uint32_t       offset;
+    SpatialPattern pattern;
+  };
+
+  struct PHTData {
+    CompactPattern pattern;
+  };
+
+  struct PBData {
+    SpatialPattern pending;
   };
 } // namespace smsf_space
 
