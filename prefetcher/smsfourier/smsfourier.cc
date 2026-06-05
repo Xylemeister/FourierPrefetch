@@ -42,14 +42,62 @@ void SMS::insert_in_pht(uint64_t /*pc*/, uint32_t /*offset*/, const SpatialPatte
 {
 }
 
-void SMS::access(uint64_t /*block_number*/, uint64_t /*pc*/) {}
+void SMS::access(uint64_t block_number, uint64_t pc)
+{
+  const uint64_t region = region_of(block_number);
+  const uint32_t off    = offset_of(block_number);
+
+  if (auto* a = at.find(region)) {
+    a->data.pattern.set(off);
+    at.touch(region);
+    return;
+  }
+
+  auto* f = ft.find(region);
+  if (!f) {
+    ft.insert(region, FTData{pc, off});
+
+    SpatialPattern pred = find_in_pht(pc, off);
+    if (pred.any()) {
+      pred.reset(off);
+      pb.insert(region, PBData{pred});
+    }
+    return;
+  }
+
+  if (f->data.offset != off) {
+    ATData ae;
+    ae.pc     = f->data.pc;
+    ae.offset = f->data.offset;
+    ae.pattern.set(f->data.offset);
+    ae.pattern.set(off);
+
+    auto victim = at.insert(region, ae);
+    ft.erase(region);
+
+    if (victim.valid) {
+      insert_in_pht(victim.data.pc, victim.data.offset, victim.data.pattern);
+      ++generations;
+    }
+  }
+}
 
 uint32_t SMS::prefetch(CACHE* /*cache*/, uint64_t /*block_number*/, uint32_t /*metadata_in*/)
 {
   return 0;
 }
 
-void SMS::eviction(uint64_t /*block_number*/) {}
+void SMS::eviction(uint64_t block_number)
+{
+  const uint64_t region = region_of(block_number);
+  ft.erase(region);
+
+  auto victim = at.erase(region);
+  if (victim.valid) {
+    insert_in_pht(victim.data.pc, victim.data.offset, victim.data.pattern);
+    ++generations;
+  }
+}
 
 void CACHE::prefetcher_initialize()
 {
@@ -60,17 +108,31 @@ void CACHE::prefetcher_initialize()
   std::cout << NAME << " SMS-Fourier Prefetcher (L2)" << std::endl;
 }
 
-uint32_t CACHE::prefetcher_cache_operate(uint64_t /*addr*/, uint64_t /*ip*/,
+uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
                                          uint8_t /*cache_hit*/, bool /*useful_prefetch*/,
                                          uint8_t /*type*/, uint32_t metadata_in)
 {
+  if (static_cast<size_t>(cpu) >= sms_per_cpu.size() || sms_per_cpu[cpu] == nullptr)
+    return metadata_in;
+  SMS* sms = sms_per_cpu[cpu];
+
+  const uint64_t block_number = addr >> LOG2_BLOCK_SIZE;
+  sms->access(block_number, ip);
+
   return metadata_in;
 }
 
 uint32_t CACHE::prefetcher_cache_fill(uint64_t /*addr*/, uint32_t /*set*/, uint32_t /*way*/,
-                                      uint8_t /*prefetch*/, uint64_t /*evicted_addr*/,
+                                      uint8_t /*prefetch*/, uint64_t evicted_addr,
                                       uint32_t metadata_in)
 {
+  if (static_cast<size_t>(cpu) >= sms_per_cpu.size() || sms_per_cpu[cpu] == nullptr)
+    return metadata_in;
+  SMS* sms = sms_per_cpu[cpu];
+
+  if (evicted_addr != 0) {
+    sms->eviction(evicted_addr >> LOG2_BLOCK_SIZE);
+  }
   return metadata_in;
 }
 
