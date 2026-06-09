@@ -18,7 +18,8 @@ constexpr std::size_t PF_BITS = 8;
 constexpr std::size_t PF_CAP  = 1u << PF_BITS;
 constexpr std::size_t PF_MASK = PF_CAP - 1;
 
-constexpr double MSHR_DEMOTE_RATIO = 0.5;
+constexpr double MSHR_DEMOTE_RATIO  = 0.5;   // high-prio: fill at L2 below this
+constexpr double MSHR_LOWPRIO_RATIO = 0.25;  // low-prio (L2-only): skip at/above this
 
 class PrefetchFilter
 {
@@ -73,7 +74,6 @@ struct Stats {
     uint64_t no_signal            = 0;
     uint64_t emitted              = 0;
     uint64_t pred_l2_only         = 0;
-    uint64_t pred_with_extras     = 0;
 
     std::array<uint64_t,
         periodicity::PeriodicityBuf<periodicity::WINDOW_SIZE>::PMAX + 1>
@@ -87,8 +87,6 @@ struct Stats {
 
     uint64_t l2_attempts          = 0;
     uint64_t l2_accepted          = 0;
-    uint64_t extra_attempts       = 0;
-    uint64_t extra_accepted       = 0;
 
     uint64_t c_total              = 0;
     uint64_t c_useful             = 0;
@@ -133,7 +131,6 @@ public:
         std::cout << "no_signal            : " << stats_.no_signal            << '\n';
         std::cout << "emitted              : " << stats_.emitted              << '\n';
         std::cout << "pred_l2_only         : " << stats_.pred_l2_only         << '\n';
-        std::cout << "pred_with_extras     : " << stats_.pred_with_extras     << '\n';
 
         std::cout << "period_hist          :";
         for (std::size_t p = 1; p < stats_.period_hist.size(); ++p)
@@ -154,8 +151,6 @@ public:
         std::cout << "emit_pf_filtered     : " << stats_.emit_pf_filtered     << '\n';
         std::cout << "l2_attempts          : " << stats_.l2_attempts          << '\n';
         std::cout << "l2_accepted          : " << stats_.l2_accepted          << '\n';
-        std::cout << "extra_attempts       : " << stats_.extra_attempts       << '\n';
-        std::cout << "extra_accepted       : " << stats_.extra_accepted       << '\n';
         std::cout << "c_total              : " << stats_.c_total              << '\n';
         std::cout << "c_useful             : " << stats_.c_useful             << '\n';
         std::cout << "evicted_unused       : " << stats_.evicted_unused       << '\n';
@@ -257,8 +252,7 @@ private:
             return;
         }
 
-        if (!pred.deltas.empty())       ++stats_.emitted;
-        if (!pred.extra_deltas.empty()) ++stats_.pred_with_extras;
+        if (!pred.deltas.empty()) ++stats_.emitted;
 
         std::size_t advance    = 0;
         bool        cache_full = false;
@@ -303,35 +297,6 @@ private:
                                    + advance;
         e.frontier_step = static_cast<uint16_t>(
             std::min<std::size_t>(new_step, periodicity::MAX_FRONTIER_STEPS));
-
-        if (cache_full) return;
-        for (auto it = pred.extra_deltas.rbegin();
-             it != pred.extra_deltas.rend(); ++it) {
-            const int64_t d = *it;
-            if (d == 0) continue;
-
-            const uint64_t pf_cl   = static_cast<uint64_t>(
-                                         static_cast<int64_t>(cl_addr) + d);
-            const uint64_t pf_addr = pf_cl << LOG2_BLOCK_SIZE;
-
-            if ((pf_addr >> LOG2_PAGE_SIZE) != demand_page) {
-                ++stats_.emit_page_filtered;
-                continue;
-            }
-            if (pf_.Contains(pf_cl)) {
-                ++stats_.emit_pf_filtered;
-                continue;
-            }
-
-            ++stats_.extra_attempts;
-            if (emit(pf_addr, false)) {
-                ++stats_.extra_accepted;
-                pf_.Insert(pf_cl);
-                ++stats_.c_total;
-            } else {
-                break;
-            }
-        }
     }
 
     void BumpPeriodHist(std::size_t period)
@@ -373,8 +338,15 @@ uint32_t CACHE::prefetcher_cache_operate(uint64_t addr, uint64_t ip,
 
     engine.Update(cl_addr, ip, demand_page,
         [this](uint64_t pf_addr, bool l2_only) -> bool {
-            const bool fill_here = !l2_only
-                && this->get_mshr_occupancy_ratio() < MSHR_DEMOTE_RATIO;
+            const double mshr = this->get_mshr_occupancy_ratio();
+            if (l2_only) {
+                // Lower-priority (weak) prefetches get a stricter MSHR gate:
+                // skip them once the MSHR is busier than MSHR_LOWPRIO_RATIO so
+                // they don't crowd out demand misses or high-prio prefetches.
+                if (mshr >= MSHR_LOWPRIO_RATIO) return false;
+                return prefetch_line(pf_addr, false, 0);  // always LLC-only
+            }
+            const bool fill_here = mshr < MSHR_DEMOTE_RATIO;
             return prefetch_line(pf_addr, fill_here, 0);
         });
 

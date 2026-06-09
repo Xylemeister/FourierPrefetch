@@ -24,7 +24,6 @@ constexpr std::size_t MAX_SECONDARY_CANDIDATES = 1;
 
 struct Prediction {
     std::vector<int64_t> deltas;
-    std::vector<int64_t> extra_deltas;
     std::size_t          period      = 0;
     double               best_score  = 0.0;
     std::size_t          candidates  = 0;
@@ -50,57 +49,49 @@ public:
                        double      l2_threshold  = PERIODICITY_L2_THRESHOLD,
                        std::size_t depth         = PREFETCH_DEPTH,
                        std::size_t start_step    = 0,
-                       std::size_t extra_max     = MAX_SECONDARY_CANDIDATES) const
+                       std::size_t /*extra_max*/ = MAX_SECONDARY_CANDIDATES) const
     {
         Prediction out;
         if (depth == 0 || !IsMature()) return out;
         const double total = TotalEnergy();
         if (total <= 0.0) return out;
 
-        struct Scored { double s_adj; std::size_t p; };
-        std::array<Scored, PMAX> scored{};
-        std::size_t n = 0;
-
         const std::size_t p_max =
             std::min<std::size_t>(PMAX, count_ / MIN_CYCLES);
+
+        // Scan candidate periods from smallest to largest. The smallest period
+        // that clears the strong threshold is committed to and the scan stops
+        // (early exit). If none clears it, keep the single best-scoring period
+        // as a weak L2-only fallback.
+        double      best_s = -1.0;
+        std::size_t best_p = 0;
+
         for (std::size_t p = 1; p <= p_max; ++p) {
             const double s_raw = ProjectionEnergy(p) / total;
-            const double s_adj = s_raw - static_cast<double>(p - 1)
-                                       / static_cast<double>(count_);
-            if (s_adj >= threshold) ++out.candidates;
-            scored[n++] = {s_adj, p};
-        }
-        if (n == 0) return out;
+            const double s_adj = s_raw;
+            // const double s_adj = s_raw - static_cast<double>(p - 1)
+            //                            / static_cast<double>(count_);
 
-        const std::size_t want = std::min<std::size_t>(n, 1 + extra_max);
-        std::partial_sort(scored.begin(), scored.begin() + want,
-                          scored.begin() + n,
-                          [](const Scored& a, const Scored& b) {
-                              return a.s_adj > b.s_adj
-                                  || (a.s_adj == b.s_adj && a.p < b.p);
-                          });
-
-        out.best_score = scored[0].s_adj;
-        if (scored[0].s_adj < l2_threshold) return out;
-
-        out.period  = scored[0].p;
-        out.deltas  = CyclicReplay(scored[0].p, depth, start_step);
-        out.l2_only = (scored[0].s_adj < threshold);
-        if (out.l2_only) return out;
-
-        for (std::size_t k = 1; k < want; ++k) {
-            if (scored[k].s_adj < threshold) break;
-            if (scored[k].p == scored[0].p) continue;
-            const auto sd = CyclicReplay(scored[k].p, depth, 0);
-            for (int64_t d : sd) {
-                bool dup = false;
-                for (int64_t dp : out.deltas) {
-                    if (dp == d) { dup = true; break; }
-                }
-                if (!dup) out.extra_deltas.push_back(d);
+            if (s_adj >= threshold) {
+                ++out.candidates;
+                out.best_score = s_adj;
+                out.period     = p;
+                out.deltas     = CyclicReplay(p, depth, start_step);
+                out.l2_only    = false;
+                return out;
             }
+
+            if (s_adj > best_s) { best_s = s_adj; best_p = p; }
         }
 
+        // No period cleared the strong threshold. If the best is at least the
+        // weak threshold, emit it as an L2-only (LLC-fill) prediction.
+        out.best_score = best_s;
+        if (best_p == 0 || best_s < l2_threshold) return out;
+
+        out.period  = best_p;
+        out.deltas  = CyclicReplay(best_p, depth, start_step);
+        out.l2_only = true;
         return out;
     }
 
